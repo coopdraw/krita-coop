@@ -193,6 +193,36 @@ class NativeTests(unittest.TestCase):
         s.settle(self)
         self.assertEqual(px(g, "Sketch", 25, 155), GREEN)
 
+    def test_refused_pause_is_simply_tried_again(self):
+        s, g = self.s, self.s.gdoc
+        g.idle = False
+        g.paint(g.find("Sketch"), 200, 100, 10, 10, BLUE)
+        g.refuse_pauses = 4  # Krita: "not now" (the running jobs can't finish while held back)
+        s.hdoc.paint(s.hdoc.find("Sketch"), 100, 150, 20, 20, GREEN)
+        self.assertTrue(s.pump(lambda: px(g, "Sketch", 105, 155) == GREEN), "paint never arrived")
+        self.assertEqual(g.refused_pauses, 4)
+        self.assertFalse(g.idle)
+        g.idle = True
+        s.settle(self)
+
+    def test_write_refused_during_a_merge_is_done_afterwards(self):
+        s, g = self.s, self.s.gdoc
+        sk = g.find("Sketch")
+        g.idle = False
+        g.merging.add(sk.uuid)  # a finished stroke is being merged into the guest's layer
+        s.hdoc.paint(s.hdoc.find("Sketch"), 100, 150, 20, 20, GREEN)
+        s.hdoc.paint(s.hdoc.find("Ink"), 110, 80, 10, 10, GREEN)
+        self.assertTrue(s.pump(lambda: px(g, "Ink", 115, 85) == GREEN), "the other layer did not update")
+        for _ in range(25):
+            s.tick()
+            time.sleep(0.004)
+        self.assertEqual(px(g, "Sketch", 105, 155), CLEAR)
+        self.assertGreater(g.refused_writes, 0)
+        g.merging.clear()
+        self.assertTrue(s.pump(lambda: px(g, "Sketch", 105, 155) == GREEN), "the refused tile was dropped")
+        g.idle = True
+        s.settle(self)
+
     def test_layer_changes_still_wait_for_the_stroke_to_end(self):
         s, g = self.s, self.s.gdoc
         g.idle = False

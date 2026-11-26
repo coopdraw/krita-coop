@@ -55,7 +55,8 @@ class KritaDoc(object):
         self._ps = None
         self.native = False  # the co-op build's extra API is there
         try:
-            self.native = hasattr(document, "coopApiVersion") and document.coopApiVersion() >= 1
+            # (version 1 had a coopPause() that could wait forever)
+            self.native = hasattr(document, "coopApiVersion") and document.coopApiVersion() >= 2
         except Exception:  # noqa: BLE001
             self.native = False
         self._paused = False
@@ -226,10 +227,12 @@ class KritaDoc(object):
         return bool(self.native and n is not None and n.coopOverlayActive())
 
     def write_tile(self, u, x, y, w, h, data):
+        """Returns False if nothing was written and the tile has to be tried again later: the
+        co-op build refuses to write into a layer while a finished stroke is merged into it."""
         if self.native:
-            self._nodes[u].coopSetPixelData(data, x, y, w, h)  # + async update of that area
-        else:
-            self._nodes[u].setPixelData(data, x, y, w, h)
+            return bool(self._nodes[u].coopSetPixelData(data, x, y, w, h))  # + async update of that area
+        self._nodes[u].setPixelData(data, x, y, w, h)
+        return True
 
     # ---- scheduling ----------------------------------------------------------
     def is_idle(self):
@@ -260,7 +263,11 @@ class KritaDoc(object):
 
     def pause(self):
         """Hold the running stroke between two of its jobs (co-op build only). While held, the
-        layers can be read and written without racing against it. Always resume()."""
+        layers can be read and written without racing against it. Always resume().
+
+        False: not held. Krita gives up after a few milliseconds when the jobs that are running
+        can't finish while the rest is held back (a stroke being merged into its layer); the
+        caller just tries again later."""
         if not self.native or self._paused:
             return False
         self._paused = bool(self.d.coopPause())

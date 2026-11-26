@@ -306,7 +306,8 @@ class Replica(object):
             target = pixops.select(base, local, unsent, n)
         wrote = False
         if target != local:
-            self.doc.write_tile(u, x, y, w, h, target)
+            if self.doc.write_tile(u, x, y, w, h, target) is False:
+                return None  # refused (a stroke is being merged into the layer): later
             L.strip_crc[ty] = None
             wrote = True
         if key in L.unacked:

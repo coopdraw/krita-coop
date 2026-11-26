@@ -1,5 +1,5 @@
 diff --git a/libs/image/kis_image.cc b/libs/image/kis_image.cc
-index 7d551f0..a1fdb4d 100644
+index 7d551f0..3dc8edd 100644
 --- a/libs/image/kis_image.cc
 +++ b/libs/image/kis_image.cc
 @@ -276,6 +276,12 @@ public:
@@ -15,11 +15,11 @@ index 7d551f0..a1fdb4d 100644
      KisCompositeProgressProxy compositeProgressProxy;
  
      QPointF axesCenter;
-@@ -803,6 +809,69 @@ void KisImage::immediateLockForReadOnly()
+@@ -803,6 +809,77 @@ void KisImage::immediateLockForReadOnly()
      m_d->lockedForReadOnly = true;
  }
  
-+void KisImage::pauseProcessingForCoop()
++bool KisImage::pauseProcessingForCoop(int timeoutMs)
 +{
 +    if (!locked()) {
 +        /**
@@ -31,11 +31,19 @@ index 7d551f0..a1fdb4d 100644
 +         * right one: it just tells the worker threads not to block on the GUI thread.
 +         */
 +        KisBusyWaitBroker::instance()->notifyGeneralWaitStarted();
-+        m_d->scheduler.immediateLockForReadOnly();
++        const bool paused = m_d->scheduler.tryImmediateLockForReadOnly(timeoutMs);
 +        KisBusyWaitBroker::instance()->notifyGeneralWaitEnded();
++
++        /**
++         * Not paused: a running job could not finish while the others were held back
++         * (see the header). Processing has been resumed already.
++         */
++        if (!paused) return false;
++
 +        m_d->lockedForReadOnly = true;
 +    }
 +    m_d->lockCount++;
++    return true;
 +}
 +
 +QString KisImage::currentStrokeId() const
@@ -85,7 +93,7 @@ index 7d551f0..a1fdb4d 100644
  void KisImage::unlock()
  {
      Q_ASSERT(locked());
-@@ -2424,6 +2493,30 @@ void KisImage::KisImagePrivate::
+@@ -2424,6 +2501,30 @@ void KisImage::KisImagePrivate::
  
  void KisImage::requestProjectionUpdate(KisNode *node, const QVector<QRect> &rects, KisProjectionUpdateFlags flags)
  {
@@ -117,7 +125,7 @@ index 7d551f0..a1fdb4d 100644
       * We iterate through the filters in a reversed way. It makes the most nested filters
       * to execute first.
 diff --git a/libs/image/kis_image.h b/libs/image/kis_image.h
-index 71a7abb..00b6842 100644
+index 71a7abb..388fa51 100644
 --- a/libs/image/kis_image.h
 +++ b/libs/image/kis_image.h
 @@ -9,6 +9,9 @@
@@ -130,7 +138,7 @@ index 71a7abb..00b6842 100644
  #include <QPainter>
  #include <QRect>
  
-@@ -172,6 +175,54 @@ public:
+@@ -172,6 +175,60 @@ public:
       */
      void immediateLockForReadOnly();
  
@@ -145,9 +153,15 @@ index 71a7abb..00b6842 100644
 +     * devices from the GUI thread without racing against the stroke. Keep the pause
 +     * short (a few milliseconds) and never block on anything a paused job may hold.
 +     *
-+     * Pair with unlock(). The LoD planes are not reset by that unlock().
++     * The wait is limited to \p timeoutMs. A running job may be unable to finish
++     * while the others are held back (a projection update waiting for a stroke's
++     * final merge, which holds the indirect-painting lock over several jobs); then
++     * nothing is paused and the function returns false. Just try again later.
++     *
++     * \return true if processing is paused; pair it with unlock() then. The LoD
++     * planes are not reset by that unlock().
 +     */
-+    void pauseProcessingForCoop();
++    bool pauseProcessingForCoop(int timeoutMs = 25);
 +
 +    /**
 +     * [co-op build] id of the stroke that is being executed right now
@@ -262,13 +276,26 @@ index 3c31737..31c141a 100644
  
      bool wrapAroundModeSupported() const;
 diff --git a/libs/image/kis_update_scheduler.cpp b/libs/image/kis_update_scheduler.cpp
-index 8a37ce5..be3a170 100644
+index 8a37ce5..91ae5fc 100644
 --- a/libs/image/kis_update_scheduler.cpp
 +++ b/libs/image/kis_update_scheduler.cpp
-@@ -292,6 +292,20 @@ void KisUpdateScheduler::immediateLockForReadOnly()
+@@ -292,6 +292,33 @@ void KisUpdateScheduler::immediateLockForReadOnly()
      m_d->updaterContext.waitForDone();
  }
  
++bool KisUpdateScheduler::tryImmediateLockForReadOnly(int timeoutMs)
++{
++    m_d->processingBlocked = true;
++    if (m_d->updaterContext.tryWaitForDone(timeoutMs)) {
++        return true;
++    }
++
++    // some job cannot finish while we block the others: let everything go on
++    m_d->processingBlocked = false;
++    processQueues();
++    return false;
++}
++
 +QString KisUpdateScheduler::currentStrokeId() const
 +{
 +    return m_d->strokesQueue.currentStrokeId();
@@ -287,13 +314,26 @@ index 8a37ce5..be3a170 100644
  {
      if (resetLodLevels) {
 diff --git a/libs/image/kis_update_scheduler.h b/libs/image/kis_update_scheduler.h
-index c6ee974..65c5285 100644
+index c6ee974..506bf16 100644
 --- a/libs/image/kis_update_scheduler.h
 +++ b/libs/image/kis_update_scheduler.h
-@@ -62,6 +62,13 @@ public:
+@@ -62,6 +62,26 @@ public:
       */
      void immediateLockForReadOnly();
  
++    /**
++     * [co-op build] Like immediateLockForReadOnly(), but gives up (and resumes
++     * processing) if the running jobs have not finished after \p timeoutMs.
++     *
++     * A running job may be unable to finish without further jobs being started:
++     * a projection update waits for the lock of an indirect-painting target while
++     * the final merge of a stroke holds that lock over several of its jobs. Waiting
++     * for such a job with processing blocked would never end.
++     *
++     * \return true if processing is blocked now
++     */
++    bool tryImmediateLockForReadOnly(int timeoutMs);
++
 +    /// [co-op build] id of the stroke that is being executed now, empty if none
 +    QString currentStrokeId() const;
 +
@@ -304,17 +344,66 @@ index c6ee974..65c5285 100644
      /**
       * Unblocks the process and calls processQueues()
       *
+diff --git a/libs/image/kis_updater_context.cpp b/libs/image/kis_updater_context.cpp
+index 8fece00..399d173 100644
+--- a/libs/image/kis_updater_context.cpp
++++ b/libs/image/kis_updater_context.cpp
+@@ -9,6 +9,7 @@
+ #include <QThread>
+ #include <QThreadPool>
+ #include <QMutexLocker>
++#include <QDeadlineTimer>
+ 
+ #include "kis_update_job_item.h"
+ #include "kis_stroke_job.h"
+@@ -215,6 +216,19 @@ void KisUpdaterContext::waitForDone()
+     }
+ }
+ 
++bool KisUpdaterContext::tryWaitForDone(int timeoutMs)
++{
++    QMutexLocker l(&m_runningThreadsMutex);
++
++    const QDeadlineTimer deadline(timeoutMs);
++    while(m_numRunningThreads > 0) {
++        if (!m_waitForDoneCondition.wait(l.mutex(), deadline)) {
++            return m_numRunningThreads == 0;
++        }
++    }
++    return true;
++}
++
+ bool KisUpdaterContext::isIdle() const
+ {
+     std::unique_lock<QMutex> locker(m_runningThreadsMutex, std::try_to_lock);
+diff --git a/libs/image/kis_updater_context.h b/libs/image/kis_updater_context.h
+index ae0043f..d3fab5a 100644
+--- a/libs/image/kis_updater_context.h
++++ b/libs/image/kis_updater_context.h
+@@ -98,6 +98,12 @@ public:
+      */
+     void waitForDone();
+ 
++    /**
++     * [co-op build] Like waitForDone(), but gives up after \p timeoutMs.
++     * \return true if no job is running any more
++     */
++    bool tryWaitForDone(int timeoutMs);
++
+     /**
+      * Returns true if there are no jobs running in the context
+      *
 diff --git a/libs/libkis/Document.cpp b/libs/libkis/Document.cpp
-index e1cfd9a..44acfe6 100644
+index e1cfd9a..02d484c 100644
 --- a/libs/libkis/Document.cpp
 +++ b/libs/libkis/Document.cpp
-@@ -834,6 +834,69 @@ bool Document::tryBarrierLock()
+@@ -834,6 +834,68 @@ bool Document::tryBarrierLock()
      return d->document->image()->tryBarrierLock();
  }
  
 +int Document::coopApiVersion() const
 +{
-+    return 1;
++    return 2;
 +}
 +
 +void Document::coopSetTracking(bool enabled)
@@ -361,11 +450,10 @@ index e1cfd9a..44acfe6 100644
 +    return d->document->image()->currentStrokeId();
 +}
 +
-+bool Document::coopPause()
++bool Document::coopPause(int timeoutMs)
 +{
 +    if (!d->document || !d->document->image()) return false;
-+    d->document->image()->pauseProcessingForCoop();
-+    return true;
++    return d->document->image()->pauseProcessingForCoop(timeoutMs);
 +}
 +
 +void Document::coopResume()
@@ -379,16 +467,17 @@ index e1cfd9a..44acfe6 100644
  {
      if (!d->document || !d->document->image()) return;
 diff --git a/libs/libkis/Document.h b/libs/libkis/Document.h
-index 240d609..e837c69 100644
+index 240d609..5fa8a70 100644
 --- a/libs/libkis/Document.h
 +++ b/libs/libkis/Document.h
-@@ -1049,6 +1049,63 @@ newDoc.setGridConfig(newDocGrid)
+@@ -1049,6 +1049,69 @@ newDoc.setGridConfig(newDocGrid)
       */
      bool setAudioTracks(const QList<QString> files) const;
  
 +    /**
 +     * @brief [co-op build] coopApiVersion
-+     * @return the version of the coop* functions of Document and Node (currently 1).
++     * @return the version of the coop* functions of Document and Node (currently 2;
++     * in version 1 coopPause() could wait forever).
 +     * These functions exist only in the co-op build of Krita; a script should test for
 +     * them with hasattr().
 +     */
@@ -432,11 +521,16 @@ index 240d609..e837c69 100644
 +    /**
 +     * @brief [co-op build] coopPause pauses the running stroke (if any) and all canvas
 +     * updates between two of their jobs, without ending the stroke. While paused, pixels
-+     * can be read and written without racing against the stroke. Keep it short, and
-+     * always call coopResume() afterwards.
-+     * @return false if there is no image
++     * can be read and written without racing against the stroke. Keep it short.
++     *
++     * It waits at most @p timeoutMs for the jobs that are running right now. Sometimes
++     * they cannot finish while everything else is held back (a canvas update waiting for
++     * a stroke that is just being merged into its layer); then nothing is paused.
++     *
++     * @return true if paused: call coopResume() afterwards. false: not paused (or no
++     * image); do not write, do not call coopResume(), try again a little later.
 +     */
-+    bool coopPause();
++    bool coopPause(int timeoutMs = 25);
 +
 +    /**
 +     * @brief [co-op build] coopResume ends a pause started with coopPause().
@@ -447,7 +541,7 @@ index 240d609..e837c69 100644
  
      friend class Krita;
 diff --git a/libs/libkis/Node.cpp b/libs/libkis/Node.cpp
-index b1c1078..b6e8c75 100644
+index b1c1078..51d00f2 100644
 --- a/libs/libkis/Node.cpp
 +++ b/libs/libkis/Node.cpp
 @@ -66,6 +66,9 @@
@@ -460,7 +554,7 @@ index b1c1078..b6e8c75 100644
  
  #include "PaintingResources.h"
  #include "KisMainWindow.h"
-@@ -610,6 +613,82 @@ bool Node::setPixelData(QByteArray value, int x, int y, int w, int h)
+@@ -610,6 +613,96 @@ bool Node::setPixelData(QByteArray value, int x, int y, int w, int h)
      return true;
  }
  
@@ -528,6 +622,18 @@ index b1c1078..b6e8c75 100644
 +        return false;
 +    }
 +
++    /**
++     * While a finished stroke is merged into this node, Krita counts on no projection
++     * update being requested for it: the merge holds the indirect-painting lock over
++     * several stroke jobs, an update of this node would wait for that lock in a worker
++     * thread, and with all worker threads waiting the merge could never go on (the
++     * stroke takes the lock in a barrier job, i.e. only once all updates are done).
++     * So nothing is written, and no update is requested, during a merge.
++     */
++    KisIndirectPaintingSupport *indirect =
++        dynamic_cast<KisIndirectPaintingSupport*>(d->node.data());
++    if (indirect && !indirect->tryLockTemporaryTargetForRead()) return false;
++
 +    dev->writeBytes((const quint8*)value.constData(), x, y, w, h);
 +
 +    // invalidates the device's caches and asks the image for an asynchronous update
@@ -537,6 +643,8 @@ index b1c1078..b6e8c75 100644
 +    dev->setDirty(QRect(x, y, w, h));
 +    if (image) image->setCoopDirtySuppressedForCurrentThread(false);
 +
++    if (indirect) indirect->unlockTemporaryTargetAfterRead();
++
 +    return true;
 +}
 +
@@ -544,10 +652,10 @@ index b1c1078..b6e8c75 100644
  {
      if (!d->node) return QRect();
 diff --git a/libs/libkis/Node.h b/libs/libkis/Node.h
-index ce63d3f..3bbdf40 100644
+index ce63d3f..5980cda 100644
 --- a/libs/libkis/Node.h
 +++ b/libs/libkis/Node.h
-@@ -447,6 +447,39 @@ public Q_SLOTS:
+@@ -447,6 +447,43 @@ public Q_SLOTS:
       */
      bool setPixelData(QByteArray value, int x, int y, int w, int h);
  
@@ -579,8 +687,12 @@ index ce63d3f..3bbdf40 100644
 +     * schedules an asynchronous update of just that area of the canvas. It doesn't wait
 +     * for anything, and the write is not reported by Document::coopTakeDirty().
 +     *
-+     * While a stroke is running, call it only between Document::coopPause() and
-+     * Document::coopResume().
++     * While a stroke is running, call it only between a successful Document::coopPause()
++     * and Document::coopResume().
++     *
++     * @return false if nothing was written: no paint device, not enough data, or a
++     * finished stroke is being merged into this node at this moment (Krita must not be
++     * asked to update the node during that; try again later).
 +     */
 +    bool coopSetPixelData(QByteArray value, int x, int y, int w, int h);
 +
@@ -624,7 +736,7 @@ index 730c0f2..dae9b39 100644
              m_plugins.append(plugin);
          }
 diff --git a/plugins/extensions/pykrita/sip/krita/Document.sip b/plugins/extensions/pykrita/sip/krita/Document.sip
-index 44c30c6..8818cd2 100644
+index 44c30c6..e8f70bb 100644
 --- a/plugins/extensions/pykrita/sip/krita/Document.sip
 +++ b/plugins/extensions/pykrita/sip/krita/Document.sip
 @@ -133,6 +133,15 @@ public Q_SLOTS:
@@ -637,7 +749,7 @@ index 44c30c6..8818cd2 100644
 +    bool coopIsIdle() const;
 +    bool coopHasStrokes() const;
 +    QString coopActivity() const;
-+    bool coopPause();
++    bool coopPause(int timeoutMs = 25);
 +    void coopResume();
 +
  private:

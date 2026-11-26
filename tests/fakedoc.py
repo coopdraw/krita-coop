@@ -228,6 +228,9 @@ class NativeFakeDoc(FakeDoc):
         self.paused = False
         self.pauses = 0
         self.unpaused_busy_writes = 0  # writes during a stroke that was not held (must stay 0)
+        self.refuse_pauses = 0  # Krita answers "not now" to this many pause() calls
+        self.refused_pauses = 0
+        self.refused_writes = 0  # writes Krita refused because the layer was being merged
         self.live_writes = 0  # writes while a stroke was held
         self.settles = 0
 
@@ -308,6 +311,9 @@ class NativeFakeDoc(FakeDoc):
         return u in self.overlays
 
     def write_tile(self, u, x, y, w, h, data):
+        if u in self.merging:
+            self.refused_writes += 1
+            return False
         if not self.idle:
             if self.paused:
                 self.live_writes += 1
@@ -318,12 +324,17 @@ class NativeFakeDoc(FakeDoc):
             FakeDoc.write_tile(self, u, x, y, w, h, data)
         finally:
             self.idle = idle
+        return True
 
     def activity(self):
         return "" if self.idle else self.stroke
 
     def pause(self):
         if self.paused:
+            return False
+        if self.refuse_pauses > 0:
+            self.refuse_pauses -= 1
+            self.refused_pauses += 1
             return False
         self.paused = True
         self.pauses += 1

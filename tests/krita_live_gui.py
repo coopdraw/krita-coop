@@ -77,7 +77,7 @@ def main(*args):
         hd.waitForDone()
         hd.setActiveNode(paint)
         note("Krita %s, document %dx%d" % (k.version(), W, H))
-        native = hasattr(hd, "coopApiVersion") and hd.coopApiVersion() >= 1
+        native = hasattr(hd, "coopApiVersion") and hd.coopApiVersion() >= 2
         check("this Krita has the co-op API", native)
         if not native:
             return
@@ -138,7 +138,8 @@ def main(*args):
             hd.coopTakeDirty()
             lines_on(node, n_lines, 100, 800.0 / n_lines)
             mark("%s: %d strokes queued" % (label, n_lines))
-            st = {"iter": 0, "overlay": 0, "preview": 0, "pauses": 0, "dirty": 0, "busy": 0}
+            st = {"iter": 0, "overlay": 0, "preview": 0, "pauses": 0, "dirty": 0, "busy": 0,
+                  "no_pause": 0, "no_write": 0, "marker": 0}
             acts = set()
             pause_ms = []
             t0 = time.time()
@@ -160,21 +161,28 @@ def main(*args):
                 tp = time.perf_counter()
                 if first:
                     mark("%s: pausing" % label)
-                hd.coopPause()
-                if first:
-                    mark("%s: paused; writing" % label)
-                node.coopSetPixelData(marker, W - 80, H - 80, 64, 64)  # where the strokes never go
-                for tx in (512, 960, 1408):  # under the strokes: read ...
-                    for ty in (64, 128, 256, 448):
-                        t = bytes(node.pixelData(tx, ty, 64, 64))
-                        node.coopSetPixelData(t, tx, ty, 64, 64)  # ... and write back while they are held
-                if first:
-                    mark("%s: resuming" % label)
-                hd.coopResume()
-                if first:
-                    mark("%s: resumed" % label)
-                pause_ms.append(time.perf_counter() - tp)
-                st["pauses"] += 1
+                # Krita may answer "not now" to the pause (False), and refuses writes into a layer
+                # while a finished stroke is being merged into it (False): both just mean "later".
+                if hd.coopPause():
+                    if first:
+                        mark("%s: paused; writing" % label)
+                    if node.coopSetPixelData(marker, W - 80, H - 80, 64, 64):  # where the strokes never go
+                        st["marker"] += 1
+                    else:
+                        st["no_write"] += 1
+                    for tx in (512, 960, 1408):  # under the strokes: read ...
+                        for ty in (64, 128, 256, 448):
+                            t = bytes(node.pixelData(tx, ty, 64, 64))
+                            node.coopSetPixelData(t, tx, ty, 64, 64)  # ... and write back while they are held
+                    if first:
+                        mark("%s: resuming" % label)
+                    hd.coopResume()
+                    if first:
+                        mark("%s: resumed" % label)
+                    pause_ms.append(time.perf_counter() - tp)
+                    st["pauses"] += 1
+                else:
+                    st["no_pause"] += 1
                 st["dirty"] += len(bytes(hd.coopTakeDirty())) // 32
                 time.sleep(0.002)
             busy_time = time.time() - t0
@@ -188,8 +196,11 @@ def main(*args):
                  % (label, n_lines, busy_time, st["iter"], sorted(acts)))
             note("%s: overlay active in %d checks, stroke visible before it ended in %d, busy reads %d"
                  % (label, st["overlay"], st["preview"], st["busy"]))
-            note("%s: pause + 13 tile writes: p50 %.2f / p95 %.2f / max %.2f ms"
-                 % (label, pct(pause_ms, .5), pct(pause_ms, .95), pct(pause_ms, 1)))
+            note("%s: pause + 13 tile writes: p50 %.2f / p95 %.2f / max %.2f ms; paused %d times, "
+                 "pause refused %d times, write refused during a merge %d times"
+                 % (label, pct(pause_ms, .5), pct(pause_ms, .95), pct(pause_ms, 1), st["pauses"],
+                    st["no_pause"], st["no_write"]))
+            check("%s: the strokes could be held and written to while they ran" % label, st["marker"] > 0)
             check("%s: strokes ran in the background while the script kept going" % label, st["iter"] > 3,
                   "iterations %d" % st["iter"])
             check("%s: the running stroke is reported as FREEHAND_STROKE" % label, "FREEHAND_STROKE" in acts,
