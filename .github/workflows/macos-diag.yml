@@ -1,0 +1,51 @@
+name: macOS diagnostics
+
+# Measures where the macOS build spends its time, in about 15 minutes: sets the build up,
+# builds for a few minutes and prints timings (krita-build/mac/build.sh diag). Makes no app.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "architecture to configure for"
+        type: choice
+        default: arm64
+        options: [arm64, universal, x86_64]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: macos-15
+    timeout-minutes: 40
+    env:
+      WORK: ${{ github.workspace }}/work
+      ARCH: ${{ inputs.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: coop
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Source
+        run: bash coop/krita-build/mac/build.sh source
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krita/ccache
+          key: ccache-${{ inputs.arch }}-none
+          restore-keys: ccache-${{ inputs.arch }}-
+
+      - name: Dependencies
+        run: bash coop/krita-build/mac/build.sh deps
+
+      - name: Configure
+        run: bash coop/krita-build/mac/build.sh configure
+
+      - name: Diagnostics
+        run: bash coop/krita-build/mac/build.sh diag

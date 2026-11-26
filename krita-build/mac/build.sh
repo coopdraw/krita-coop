@@ -157,6 +157,45 @@ stage_cachestats() {
     fi
 }
 
+# Where the build's time goes (used by the "macOS diagnostics" workflow, after "configure"):
+# builds for a few minutes while printing the busiest processes, then prints ninja's timing
+# log and times Qt's moc by hand (mocdiag.py).
+stage_diag() {
+    say "Diagnostics: where the build's time goes"
+    cd "$SRC"
+    enter_env
+    export CCACHE_DIR="$SRC/ccache/krita"
+    echo "cores: $(sysctl -n hw.ncpu)  memory: $(sysctl -n hw.memsize)  machine: $(uname -m)"
+    local f
+    for f in "$SRC/_install/bin/moc" "$(command -v cmake)" "$(command -v ninja)" "$(command -v ccache || true)"; do
+        [ -n "$f" ] || continue
+        echo "--- $f"
+        file "$f" || true
+        codesign -dv "$f" 2>&1 | head -n 4 || true
+        xattr -l "$f" || true
+    done
+    cd _build
+    ( while true; do
+          sleep 50
+          echo "--- busiest processes"
+          top -l 2 -n 8 -o cpu -stats pid,command,cpu,time | tail -n 9 || true
+      done ) &
+    local watcher=$!
+    ninja install > "$WORK/diag_ninja.out" 2>&1 &
+    local pid=$! waited=0
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "${DIAG_SECONDS:-480}" ]; do
+        sleep 5
+        waited=$((waited + 5))
+    done
+    kill "$pid" 2>/dev/null || true
+    pkill -P "$watcher" 2>/dev/null || true
+    kill "$watcher" 2>/dev/null || true
+    sleep 5
+    echo "--- the build after $waited s:"
+    grep -E '^\[[0-9]+/[0-9]+\]' "$WORK/diag_ninja.out" | tail -n 3 || true
+    python3 "$COOP/krita-build/mac/mocdiag.py" "$SRC/_build" || true
+}
+
 stage_package() {
     say "Package"
     cd "$SRC"
@@ -308,6 +347,7 @@ for stage in "$@"; do
         package) stage_package ;;
         check) stage_check ;;
         cachestats) stage_cachestats ;;
+        diag) stage_diag ;;
         gui) stage_gui ;;
         all) stage_source; stage_deps; stage_configure; stage_build; stage_package; stage_check ;;
         *) echo "unknown stage: $stage" >&2; exit 1 ;;
