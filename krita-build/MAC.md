@@ -52,7 +52,10 @@ What the stages do, and where it comes from:
 * **Architecture.** KDE's toolchain file builds x86_64 + arm64 on Apple Silicon; `ARCH=arm64` overrides it on the CMake command line, and that works. `universal` and `x86_64` have not been tried.
 * **Dependencies.** The prebuilt ones are newer than the tag; that worked on 2026-11-25. Do not pass `-DBUILD_WITH_QT6`.
 * **Signing.** The app gets an ad-hoc signature (`codesign --force --deep --sign -`); KDE signs with its certificate and notarises. An ad-hoc signed app runs, but macOS quarantines a downloaded copy until the flag is removed (step 3 above).
-* **Compiler cache.** It does not work yet: KDE's generated environment did not make CMake use ccache, and passing it to CMake explicitly did not either (ccache reports 0 calls after a build). Every build is a full one.
+* **Two caches make a rebuild shorter.** Both live in `work/krita/ccache`, which the workflow keeps between runs (GitHub drops it after 7 days without a build).
+  * *Compiler*: ccache, passed to CMake explicitly (KDE's generated environment alone did not switch it on). It is told to identify the compiler by its version text: by default it uses the compiler's file time, and that changes every time GitHub renews its machine image, which emptied the cache about once a week.
+  * *Qt's moc*: `krita-build/mac/moccache.py`. With every compile coming out of ccache a build still took an hour, because moc needs about 3 seconds per header on these machines (the `moc` among KDE's prebuilt dependencies is an Intel program, so it runs under Rosetta, and Krita's headers pull in a lot) and CMake runs it a few thousand times. The script keeps moc's results; a result is reused only when the command and the content of every file moc had read are unchanged, and adding or removing any header anywhere starts a new cache. `COOP_NO_MOCCACHE=1 build.sh configure ...` builds without it.
+  * The **macOS diagnostics** workflow (`.github/workflows/macos-diag.yml`, 15 minutes) shows where a build's time goes and, with `MOCCACHE_VERIFY`, compares every stored moc result it uses with what moc makes now.
 * **kritarunner** on macOS imports its script only from Krita's own plugin folders, not from the working directory as on Windows; `check` copies the test scripts next to the engine inside the app for the run.
 * **Threads.** GitHub's Macs have 3 cores, which exposed a hang in the patch that a 16-thread PC had hidden (pixels written into a layer while a finished stroke was being merged into it). It is fixed, and it is the reason to run **macOS check** after every build.
 * **Runner labels.** `macos-14` no longer exists; the workflows use `macos-15`.
@@ -61,6 +64,6 @@ What the stages do, and where it comes from:
 
 1. Start it. **Settings > Dockers > Coop Drawing** must be there without installing anything, and during a session the docker's status must end with "Live mode: ...".
 2. `build.sh check` (also run by the workflow): `tests/krita_bundled_probe.log` must say `native: True`, and `tests/krita_integration.log` must end with `RESULT: OK`.
-3. Engine tests, no Krita needed: `python3 -m unittest discover -s tests` (81 tests).
+3. Engine tests, no Krita needed: `python3 -m unittest discover -s tests` (81 tests, plus 13 for the moc cache).
 4. Real brush strokes: `build.sh gui` (or the **macOS check** workflow). It puts the tiny plugin `tests/selftest_plugin/coop_selftest` next to Krita's own Python plugins, starts the app with `KRITA_FORCE_PYTHON_PLUGINS=coop_selftest`, `COOP_SELFTEST_DIR=<tests folder>` and `--resource-location <an empty folder>`, waits for `DONE` in `tests/krita_live_gui.log`, and closes Krita. Every line of that log must start with PASS.
 5. A real session with the Windows host, with a pen. Nothing automatic covers this.

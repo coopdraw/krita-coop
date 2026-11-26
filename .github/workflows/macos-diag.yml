@@ -48,4 +48,6 @@ jobs:
         run: bash coop/krita-build/mac/build.sh configure
 
       - name: Diagnostics
+        env:
+          MOCCACHE_VERIFY: "1"   # compare every stored moc result that gets used with what moc makes now
         run: bash coop/krita-build/mac/build.sh diag

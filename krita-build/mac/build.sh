@@ -13,6 +13,8 @@
 #   package    make a self-contained krita.app and zip it
 #   check      start the packaged kritarunner and check the built-in engine
 #   gui        real brush strokes inside the packaged app (tests/krita_live_gui.py); not part of "all"
+#   cachestats how much of the last build came out of the caches (ccache, moccache.py); not part of "all"
+#   diag       after "configure": build for 8 minutes and show where the time goes; not part of "all"
 #   all        source deps configure build package check
 #
 # Environment:
@@ -112,8 +114,38 @@ stage_configure() {
         export CCACHE_DIR="$SRC/ccache/krita"
         mkdir -p "$CCACHE_DIR"
         ccache -M "${CCACHE_MAXSIZE_COOP:-4G}" >/dev/null
+        # By default ccache identifies the compiler by its file time, which changes whenever
+        # GitHub renews the machine image (same Xcode, new install): every file was compiled again.
+        ccache --set-config "compiler_check=%compiler% --version" >/dev/null
         ccache -z >/dev/null
         cache_args=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
+    fi
+    # The other slow part is Qt's moc: seconds per header, thousands of headers, and ccache does
+    # not cover it. CMake gets a wrapper that keeps moc's results between builds (moccache.py).
+    # COOP_NO_MOCCACHE=1 switches that off.
+    local moc_args=() real_moc="$SRC/_install/bin/moc"
+    if [ -x "$real_moc" ] && [ -z "${COOP_NO_MOCCACHE:-}" ]; then
+        local moc_dir="$SRC/ccache/moc" salt
+        mkdir -p "$moc_dir" "$SRC/_build"
+        rm -f "$moc_dir/stats.log"
+        find "$moc_dir" -type f \( -name '*.tmp' -o -name '*.z' -mtime +14 \) -delete || true
+        # the names (not the contents) of every header moc could find: when a file is added or
+        # removed anywhere, the stored results are not used any more
+        salt="$( { git -C "$SRC" ls-files
+                   grep '^+++ ' "$COOP/krita-patches/coop-core.patch"
+                   ls "$SRC/plugins/python/krita_coop"
+                   find -L "$SRC/_install/include" "$SRC/_install/lib" -type f \
+                        \( -path '*/include/*' -o -path '*/Headers/*' \) 2>/dev/null || true
+                 } | LC_ALL=C sort | shasum -a 256 | cut -d' ' -f1 )"
+        cat > "$SRC/_build/moc-cached" <<EOF
+#!/bin/sh
+export MOCCACHE_DIR="$moc_dir"
+export MOCCACHE_SALT="$salt"
+exec "$WORK/venv/bin/python3" -S -E "$COOP/krita-build/mac/moccache.py" "$real_moc" "\$@"
+EOF
+        chmod +x "$SRC/_build/moc-cached"
+        echo "moc results are cached in $moc_dir (salt ${salt:0:12})"
+        moc_args=("-DCMAKE_AUTOMOC_EXECUTABLE=$SRC/_build/moc-cached")
     fi
     local arch_args=()
     case "$ARCH" in
@@ -130,6 +162,7 @@ stage_configure() {
         -DCMAKE_TOOLCHAIN_FILE="$SRC/krita-deps-management/tools/macos-toolchain-krita.cmake" \
         "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local;/opt/local" \
         ${cache_args[@]+"${cache_args[@]}"} \
+        ${moc_args[@]+"${moc_args[@]}"} \
         ${arch_args[@]+"${arch_args[@]}"}
 }
 
@@ -155,6 +188,17 @@ stage_cachestats() {
     else
         echo "ccache is not on the PATH"
     fi
+    local stats="$SRC/ccache/moc/stats.log"
+    if [ -f "$stats" ]; then
+        tally() { tr -cd "$1" < "$stats" | wc -c | tr -d ' '; }
+        echo "moc cache: $(tally h) results from the cache, $(tally m) made and stored, $(tally u) not cacheable, $(du -sh "$SRC/ccache/moc" | cut -f1)"
+        if [ "$(tally X)" != 0 ]; then
+            echo "ERROR: $(tally X) stored moc results differed from what moc makes (MOCCACHE_VERIFY)"
+            return 1
+        fi
+    else
+        echo "moc cache: not used in this build"
+    fi
 }
 
 # Where the build's time goes (used by the "macOS diagnostics" workflow, after "configure"):
@@ -174,6 +218,12 @@ stage_diag() {
         codesign -dv "$f" 2>&1 | head -n 4 || true
         xattr -l "$f" || true
     done
+    f="$(xcrun -f clang++ 2>/dev/null || true)"
+    if [ -n "$f" ]; then
+        echo "--- compiler: $f"
+        stat -f 'size %z, changed %Sm' "$f" || true
+        "$f" --version || true
+    fi
     cd _build
     ( while true; do
           sleep 50
@@ -194,6 +244,7 @@ stage_diag() {
     echo "--- the build after $waited s:"
     grep -E '^\[[0-9]+/[0-9]+\]' "$WORK/diag_ninja.out" | tail -n 3 || true
     python3 "$COOP/krita-build/mac/mocdiag.py" "$SRC/_build" || true
+    stage_cachestats        # fails when MOCCACHE_VERIFY found a wrong stored moc result
 }
 
 stage_package() {

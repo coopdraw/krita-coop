@@ -43,6 +43,8 @@ jobs:
           python3 -m unittest discover -s tests
 
       - name: Free disk space
+        # takes 4 to 5 minutes; an arm64 build needs about 15 GB and the machine has about 44 GB free
+        if: inputs.arch != 'arm64'
         run: |
           df -h /
           # other Xcode versions and the simulators are not needed and take tens of GB
@@ -58,6 +60,7 @@ jobs:
       - name: Source
         run: bash coop/krita-build/mac/build.sh source
 
+      # work/krita/ccache holds two caches: ccache's (compiler) and moccache.py's (Qt's moc)
       - name: Restore compiler cache
         uses: actions/cache/restore@v4
         with:
@@ -86,7 +89,9 @@ jobs:
           key: ccache-${{ inputs.arch }}-${{ github.run_id }}
 
       - name: Package
-        run: bash coop/krita-build/mac/build.sh package
+        run: |
+          bash coop/krita-build/mac/build.sh package
+          df -h /
 
       - name: Upload the app
         uses: actions/upload-artifact@v4
