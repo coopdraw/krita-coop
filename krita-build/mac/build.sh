@@ -244,7 +244,7 @@ stage_gui() {
             break
         fi
         # no progress in the log or the trace for 90 s: it hangs
-        stamp="$(stat -f '%m' "$log" "$trace" 2>/dev/null | tr '\n' ' ')"
+        stamp="$( (stat -f '%m' "$log" "$trace" 2>/dev/null || true) | tr '\n' ' ')"
         if [ "$stamp" = "$last" ]; then
             quiet=$((quiet + 2))
         else
