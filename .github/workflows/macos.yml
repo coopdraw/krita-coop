@@ -8,10 +8,10 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: "universal runs on every Mac but takes about twice as long to build"
+        description: "arm64 = Apple Silicon. universal also runs on Intel Macs but takes about twice as long to build"
         type: choice
-        default: universal
-        options: [universal, arm64, x86_64]
+        default: arm64
+        options: [arm64, universal, x86_64]
 
 permissions:
   contents: read
@@ -93,8 +93,7 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-      - name: Check the packaged app
-        continue-on-error: true   # first runs: learn whether kritarunner works on a CI Mac at all
+      - name: Check the packaged app   # (the app is already uploaded at this point)
         run: bash coop/krita-build/mac/build.sh check
 
       - name: Keep logs when something failed

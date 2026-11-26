@@ -104,9 +104,15 @@ stage_configure() {
     say "Configure ($ARCH)"
     cd "$SRC"
     enter_env
-    if command -v ccache >/dev/null 2>&1 && [ -n "${CCACHE_DIR:-}" ]; then
+    # A compiler cache makes the next build after a small change take minutes instead of hours.
+    # (The variables in KDE's env file alone did not make CMake use it.)
+    local cache_args=()
+    if command -v ccache >/dev/null 2>&1; then
+        export CCACHE_DIR="$SRC/ccache/krita"
+        mkdir -p "$CCACHE_DIR"
         ccache -M "${CCACHE_MAXSIZE_COOP:-4G}" >/dev/null
         ccache -z >/dev/null
+        cache_args=(-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache)
     fi
     local arch_args=()
     case "$ARCH" in
@@ -122,6 +128,7 @@ stage_configure() {
         -DCMAKE_INSTALL_PREFIX="$SRC/_install" \
         -DCMAKE_TOOLCHAIN_FILE="$SRC/krita-deps-management/tools/macos-toolchain-krita.cmake" \
         "-DCMAKE_IGNORE_PREFIX_PATH=/opt/homebrew;/usr/local;/opt/local" \
+        ${cache_args[@]+"${cache_args[@]}"} \
         ${arch_args[@]+"${arch_args[@]}"}
 }
 
@@ -130,8 +137,9 @@ stage_build() {
     cd "$SRC"
     enter_env
     cd _build
+    export CCACHE_DIR="$SRC/ccache/krita"
     ninja install
-    if command -v ccache >/dev/null 2>&1 && [ -n "${CCACHE_DIR:-}" ]; then
+    if command -v ccache >/dev/null 2>&1; then
         ccache -s || true
     fi
     ls -d "$SRC/_install/bin/krita.app"
@@ -166,17 +174,43 @@ stage_package() {
 
 stage_check() {
     say "Check the packaged app"
-    local app
+    local app engine pyk t ok=0
     app="$(ls -d "$APP_DIR"/*.app | head -1)"
-    cd "$COOP/tests"
-    rm -f krita_bundled_probe.log krita_integration.log
-    # a clean environment: the app must work without anything from the build
-    env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$app/Contents/MacOS/kritarunner" -s krita_bundled_probe -f main || true
-    cat krita_bundled_probe.log 2>/dev/null || echo "no probe log"
-    env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" "$app/Contents/MacOS/kritarunner" -s krita_integration -f main || true
-    tail -5 krita_integration.log 2>/dev/null || echo "no integration log"
-    grep -q '^native: True' krita_bundled_probe.log
-    grep -q '^RESULT: OK' krita_integration.log
+    engine="$(find "$app" -type f -path '*pykrita/krita_coop/__init__.py' | head -1)"
+    if [ -z "$engine" ]; then
+        echo "ERROR: the co-op engine is not in the app bundle" >&2
+        exit 1
+    fi
+    pyk="$(dirname "$(dirname "$engine")")"
+    rm -f "$COOP/tests/krita_bundled_probe.log" "$COOP/tests/krita_integration.log"
+    # kritarunner on macOS imports scripts only from Krita's own plugin folders (not from the
+    # working directory, as it does on Windows), so the test scripts are put next to the engine
+    # for the run. That way they also use the engine inside the app, which is the point.
+    # A clean environment: the app must work without anything from the build.
+    for t in krita_bundled_probe krita_integration; do
+        cp "$COOP/tests/$t.py" "$pyk/"
+        rm -f "$pyk/$t.log"
+        (cd "$pyk" && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+            "$app/Contents/MacOS/kritarunner" -s "$t" -f main) > "$WORK/$t.out" 2>&1 || true
+        if [ -f "$pyk/$t.log" ]; then
+            cp "$pyk/$t.log" "$COOP/tests/$t.log"
+            echo "--- $t.log"
+            tail -n 60 "$pyk/$t.log"
+        else
+            echo "--- $t wrote no log; kritarunner said:"
+            tail -n 40 "$WORK/$t.out"
+            ok=1
+        fi
+        rm -f "$pyk/$t.py" "$pyk/$t.log"
+    done
+    grep -q '^native: True' "$COOP/tests/krita_bundled_probe.log" 2>/dev/null \
+        || { echo "FAILED: the engine is not live inside the app"; ok=1; }
+    grep -q '^RESULT: OK' "$COOP/tests/krita_integration.log" 2>/dev/null \
+        || { echo "FAILED: krita_integration"; ok=1; }
+    if [ "$ok" -eq 0 ]; then
+        echo "CHECK OK"
+    fi
+    return "$ok"
 }
 
 if [ $# -eq 0 ]; then

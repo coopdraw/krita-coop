@@ -1,0 +1,60 @@
+name: macOS check
+
+# Tests an app that "macOS build" has already produced, without building again (a few minutes):
+# downloads that run's artifact, unpacks it, and runs krita-build/mac/build.sh check.
+# Started by hand: Actions > macOS check > Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "Run of 'macOS build' to test (empty = its latest successful run)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  check:
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      WORK: ${{ github.workspace }}/work
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: coop
+
+      - name: Download the app
+        run: |
+          run_id="${{ inputs.run_id }}"
+          if [ -z "$run_id" ]; then
+            run_id="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow macos.yml --status success --limit 1 --json databaseId --jq '.[0].databaseId')"
+          fi
+          echo "testing the app of run $run_id"
+          mkdir -p work/download work/app
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --dir work/download
+          zip="$(find work/download -name 'krita-coop-macos-*.zip' | head -1)"
+          ls -lh "$zip"
+          ditto -x -k "$zip" work/app
+          ls work/app
+          codesign --verify --deep work/app/krita.app && echo "signature ok"
+          lipo -archs work/app/krita.app/Contents/MacOS/krita
+          sw_vers
+
+      - name: Check the packaged app
+        run: bash coop/krita-build/mac/build.sh check
+
+      - name: Keep the test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: check-logs
+          path: |
+            coop/tests/*.log
+            work/*.out
+          retention-days: 7
+          if-no-files-found: ignore
