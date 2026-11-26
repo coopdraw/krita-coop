@@ -27,6 +27,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 os.environ["KRITA_COOP_NO_REGISTER"] = "1"
 OUT = os.path.join(HERE, "krita_live_gui.log")
+TRACE = os.path.join(HERE, "krita_live_gui.trace")
 
 W, H = 2000, 1600
 CLEAR = b"\x00\x00\x00\x00"
@@ -51,6 +52,11 @@ def main(*args):
     def flush():
         with open(OUT, "w", encoding="utf-8") as f:
             f.write("\n".join(lines) + "\n")
+
+    def mark(text):
+        """Progress marker in the trace file: if Krita hangs, the last one says where."""
+        with open(TRACE, "a", encoding="utf-8") as f:
+            f.write("%s   %s\n" % (time.strftime("%H:%M:%S"), text))
 
     restore = []
     try:
@@ -127,17 +133,22 @@ def main(*args):
                 set_mode(mode)
             except Exception:  # noqa: BLE001
                 note("%s: could not set the painting mode:\n%s" % (label, traceback.format_exc()))
+            mark("%s: painting mode set" % label)
             hd.setActiveNode(node)
             hd.coopTakeDirty()
             lines_on(node, n_lines, 100, 800.0 / n_lines)
+            mark("%s: %d strokes queued" % (label, n_lines))
             st = {"iter": 0, "overlay": 0, "preview": 0, "pauses": 0, "dirty": 0, "busy": 0}
             acts = set()
             pause_ms = []
             t0 = time.time()
             while hd.coopHasStrokes() and time.time() - t0 < 60:
                 st["iter"] += 1
+                first = st["iter"] <= 2
                 acts.add(hd.coopActivity())
                 ov = node.coopOverlayActive()
+                if first:
+                    mark("%s: round %d, stroke %r, overlay %s; reading" % (label, st["iter"], hd.coopActivity(), ov))
                 shown = bytes(node.coopPixelData(0, 64, W, 960))
                 raw = bytes(node.pixelData(0, 64, W, 960))
                 if ov:
@@ -147,19 +158,30 @@ def main(*args):
                 elif shown != raw:
                     st["preview"] += 1
                 tp = time.perf_counter()
+                if first:
+                    mark("%s: pausing" % label)
                 hd.coopPause()
+                if first:
+                    mark("%s: paused; writing" % label)
                 node.coopSetPixelData(marker, W - 80, H - 80, 64, 64)  # where the strokes never go
                 for tx in (512, 960, 1408):  # under the strokes: read ...
                     for ty in (64, 128, 256, 448):
                         t = bytes(node.pixelData(tx, ty, 64, 64))
                         node.coopSetPixelData(t, tx, ty, 64, 64)  # ... and write back while they are held
+                if first:
+                    mark("%s: resuming" % label)
                 hd.coopResume()
+                if first:
+                    mark("%s: resumed" % label)
                 pause_ms.append(time.perf_counter() - tp)
                 st["pauses"] += 1
                 st["dirty"] += len(bytes(hd.coopTakeDirty())) // 32
                 time.sleep(0.002)
             busy_time = time.time() - t0
+            mark("%s: loop over after %d rounds, %.1f s; strokes still running: %s; waiting for them"
+                 % (label, st["iter"], busy_time, hd.coopHasStrokes()))
             hd.waitForDone()
+            mark("%s: strokes done" % label)
             st["dirty"] += len(bytes(hd.coopTakeDirty())) // 32
             timing[label] = busy_time
             note("%s: %d strokes took %.2f s; loop ran %d times; stroke ids seen: %s"

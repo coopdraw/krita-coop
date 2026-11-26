@@ -232,6 +232,7 @@ stage_gui() {
     KRITA_FORCE_PYTHON_PLUGINS=coop_selftest COOP_SELFTEST_DIR="$COOP/tests" NOSPLASH=1 \
         "$app/Contents/MacOS/krita" --resource-location "$res" > "$WORK/krita_gui.out" 2>&1 &
     pid=$!
+    local stamp="" last="" quiet=0
     while [ "$waited" -lt "$limit" ]; do
         sleep 2
         waited=$((waited + 2))
@@ -240,6 +241,21 @@ stage_gui() {
         fi
         if ! kill -0 "$pid" 2>/dev/null; then
             echo "Krita exited before the test finished"
+            break
+        fi
+        # no progress in the log or the trace for 90 s: it hangs
+        stamp="$(stat -f '%m' "$log" "$trace" 2>/dev/null | tr '\n' ' ')"
+        if [ "$stamp" = "$last" ]; then
+            quiet=$((quiet + 2))
+        else
+            quiet=0
+            last="$stamp"
+        fi
+        if [ "$quiet" -ge 90 ]; then
+            echo "no progress for $quiet s: Krita hangs. What its threads are doing:"
+            sample "$pid" 3 -file "$WORK/krita_sample.txt" >/dev/null 2>&1 || true
+            # the call graph, without the long list of loaded libraries at the end
+            sed -n '/^Call graph:/,/^Total number in stack/p' "$WORK/krita_sample.txt" | cut -c1-260 | head -n 400 || true
             break
         fi
     done
