@@ -6,7 +6,7 @@ The result has to be the same thing as on Windows: Krita 5.3.4.1 (tag `v6.0.4.1`
 
 ## Getting a build from GitHub
 
-1. A build is made by hand on the repository's page: **Actions > macOS build > Run workflow**. `arm64` is for Apple Silicon and takes about an hour and a half; `universal` also runs on Intel Macs and takes about twice as long. To use a build that already exists, skip this step.
+1. A build is made by hand on the repository's page: **Actions > macOS build > Run workflow**. `arm64` is for Apple Silicon and takes about 25 minutes when there was a build in the last week, and about an hour and a half otherwise (see "Two caches" below); `universal` also runs on Intel Macs and takes about twice as long. To use a build that already exists, skip this step.
 2. Open the newest green run of **macOS build** and download **krita-coop-macos-…** under **Artifacts** (you have to be signed in to GitHub; downloads are kept for 30 days). Unzip it; inside is another zip with `krita.app`.
 3. The app is not signed by a registered developer, so macOS blocks it at first. After moving `krita.app` where you want it, run once in Terminal:
    ```bash
@@ -18,7 +18,7 @@ The result has to be the same thing as on Windows: Krita 5.3.4.1 (tag `v6.0.4.1`
    rm -rf ~/Library/Application\ Support/krita/pykrita/krita_coop ~/Library/Application\ Support/krita/pykrita/krita_coop.desktop
    ```
 
-The workflow is `.github/workflows/macos.yml`. It runs the stages of `krita-build/mac/build.sh` on one of GitHub's Apple Silicon machines, keeps a compiler cache between runs, and uploads the zipped app.
+The workflow is `.github/workflows/macos.yml`. It runs the stages of `krita-build/mac/build.sh` on one of GitHub's Apple Silicon machines, keeps two caches between runs (compiler results and Qt's moc results), and uploads the zipped app.
 
 A second workflow, **macOS check** (`.github/workflows/macos-check.yml`), tests an app that was already built, in about five minutes: it downloads the artifact of a build run and runs the `check` and `gui` stages on it. Run it after every build; the build itself only runs `check`.
 
@@ -55,6 +55,7 @@ What the stages do, and where it comes from:
 * **Two caches make a rebuild shorter.** Both live in `work/krita/ccache`, which the workflow keeps between runs (GitHub drops it after 7 days without a build).
   * *Compiler*: ccache, passed to CMake explicitly (KDE's generated environment alone did not switch it on). It is told to identify the compiler by its version text: by default it uses the compiler's file time, and that changes every time GitHub renews its machine image, which emptied the cache about once a week.
   * *Qt's moc*: `krita-build/mac/moccache.py`. With every compile coming out of ccache a build still took an hour, because moc needs about 3 seconds per header on these machines (the `moc` among KDE's prebuilt dependencies is an Intel program, so it runs under Rosetta, and Krita's headers pull in a lot) and CMake runs it a few thousand times. The script keeps moc's results; a result is reused only when the command and the content of every file moc had read are unchanged, and adding or removing any header anywhere starts a new cache. `COOP_NO_MOCCACHE=1 build.sh configure ...` builds without it.
+  * Measured on 2026-11-26 with no change between two builds: the build step went from 66 minutes to 4.5, the whole run from 85 minutes to 26 (12 of those are Qt's `macdeployqt` during packaging). The app made from cached results passed **macOS check** (49 of 49). A change to a widely included header, such as `kis_image.h` in the patch, costs more: everything that includes it is compiled and run through moc again.
   * The **macOS diagnostics** workflow (`.github/workflows/macos-diag.yml`, 15 minutes) shows where a build's time goes and, with `MOCCACHE_VERIFY`, compares every stored moc result it uses with what moc makes now.
 * **kritarunner** on macOS imports its script only from Krita's own plugin folders, not from the working directory as on Windows; `check` copies the test scripts next to the engine inside the app for the run.
 * **Threads.** GitHub's Macs have 3 cores, which exposed a hang in the patch that a 16-thread PC had hidden (pixels written into a layer while a finished stroke was being merged into it). It is fixed, and it is the reason to run **macOS check** after every build.
