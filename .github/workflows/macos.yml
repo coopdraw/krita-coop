@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   build:
-    runs-on: macos-14            # Apple Silicon
+    runs-on: macos-15            # Apple Silicon (GitHub retired macos-14 in November 2026)
     timeout-minutes: 350         # GitHub stops a job after 6 hours
     env:
       WORK: ${{ github.workspace }}/work
