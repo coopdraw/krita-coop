@@ -21,68 +21,9 @@ New-Item -ItemType Directory -Force $res | Out-Null
 $pykrita = Join-Path $KritaDev "_install\share\krita\pykrita"
 $plug = Join-Path $pykrita "coop_selftest"
 New-Item -ItemType Directory -Force $plug | Out-Null
-@"
-[Desktop Entry]
-Type=Service
-ServiceTypes=Krita/PythonPlugin
-X-KDE-Library=coop_selftest
-X-Python-2-Compatible=false
-Name=Coop self-test
-Comment=Runs tests/krita_live_gui.py (only when started by tests/run_live_gui.ps1).
-"@ | Set-Content -Encoding ascii (Join-Path $pykrita "coop_selftest.desktop")
-@"
-import os
-import sys
-import time
-import traceback
-
-from krita import Extension, Krita
-from PyQt5.QtCore import QTimer
-
-DIR = os.environ.get("COOP_SELFTEST_DIR")
-
-
-def trace(text):
-    if DIR:
-        with open(os.path.join(DIR, "krita_live_gui.trace"), "a", encoding="utf-8") as f:
-            f.write("%s %s\n" % (time.strftime("%H:%M:%S"), text))
-
-
-class SelfTest(Extension):
-    def __init__(self, parent):
-        super().__init__(parent)
-        self.started = False
-        self.tries = 0
-
-    def setup(self):
-        trace("setup")
-
-    def createActions(self, window):
-        trace("createActions")
-        if not self.started and DIR:
-            self.started = True
-            QTimer.singleShot(4000, self.run)
-
-    def run(self):
-        # (an exception escaping a Qt slot would open Krita's modal error dialog)
-        try:
-            if Krita.instance().activeWindow() is None and self.tries < 120:
-                self.tries += 1
-                if self.tries % 10 == 1:
-                    trace("no active window yet")
-                QTimer.singleShot(1000, self.run)
-                return
-            trace("running")
-            sys.path.insert(0, DIR)
-            import krita_live_gui
-            krita_live_gui.main()
-            trace("finished")
-        except BaseException:  # noqa: BLE001
-            trace("EXCEPTION\n" + traceback.format_exc())
-
-
-Krita.instance().addExtension(SelfTest(Krita.instance()))
-"@ | Set-Content -Encoding ascii (Join-Path $plug "__init__.py")
+$srcPlug = Join-Path $here "selftest_plugin"
+Copy-Item (Join-Path (Join-Path $srcPlug "coop_selftest") "__init__.py") $plug -Force
+Copy-Item (Join-Path $srcPlug "coop_selftest.desktop") $pykrita -Force
 
 $log = Join-Path $here "krita_live_gui.log"
 $trace = Join-Path $here "krita_live_gui.trace"

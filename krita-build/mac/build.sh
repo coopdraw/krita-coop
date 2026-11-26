@@ -12,7 +12,8 @@
 #   build      compile and install into $WORK/krita/_install
 #   package    make a self-contained krita.app and zip it
 #   check      start the packaged kritarunner and check the built-in engine
-#   all        all of the above
+#   gui        real brush strokes inside the packaged app (tests/krita_live_gui.py); not part of "all"
+#   all        source deps configure build package check
 #
 # Environment:
 #   WORK   where everything goes (default: $HOME/krita-coop-build), about 15 GB
@@ -213,8 +214,62 @@ stage_check() {
     return "$ok"
 }
 
+stage_gui() {
+    say "Real brush strokes inside the app (opens Krita for a minute or two)"
+    local app engine pyk res log trace pid waited=0 limit="${GUI_TIMEOUT:-480}"
+    app="$(ls -d "$APP_DIR"/*.app | head -1)"
+    engine="$(find "$app" -type f -path '*pykrita/krita_coop/__init__.py' | head -1)"
+    pyk="$(dirname "$(dirname "$engine")")"
+    res="$WORK/testres"
+    log="$COOP/tests/krita_live_gui.log"
+    trace="$COOP/tests/krita_live_gui.trace"
+    mkdir -p "$res"
+    rm -f "$log" "$trace"
+    # the plugin that starts tests/krita_live_gui.py, next to Krita's own plugins for this run
+    rm -rf "$pyk/coop_selftest"
+    cp -R "$COOP/tests/selftest_plugin/coop_selftest" "$pyk/coop_selftest"
+    cp "$COOP/tests/selftest_plugin/coop_selftest.desktop" "$pyk/"
+    KRITA_FORCE_PYTHON_PLUGINS=coop_selftest COOP_SELFTEST_DIR="$COOP/tests" NOSPLASH=1 \
+        "$app/Contents/MacOS/krita" --resource-location "$res" > "$WORK/krita_gui.out" 2>&1 &
+    pid=$!
+    while [ "$waited" -lt "$limit" ]; do
+        sleep 2
+        waited=$((waited + 2))
+        if [ -f "$log" ] && grep -q '^DONE$' "$log"; then
+            break
+        fi
+        if ! kill -0 "$pid" 2>/dev/null; then
+            echo "Krita exited before the test finished"
+            break
+        fi
+    done
+    kill "$pid" 2>/dev/null || true
+    sleep 1
+    kill -9 "$pid" 2>/dev/null || true
+    rm -rf "$pyk/coop_selftest" "$pyk/coop_selftest.desktop"
+    if [ -f "$log" ]; then
+        cat "$log"
+    else
+        echo "no log was written. Trace:"
+        cat "$trace" 2>/dev/null || echo "(no trace either: the plugin did not start)"
+        echo "Krita said:"
+        tail -n 40 "$WORK/krita_gui.out" || true
+        return 1
+    fi
+    if ! grep -q '^DONE$' "$log"; then
+        echo "THE TEST DID NOT FINISH (after $waited s)"
+        cat "$trace" 2>/dev/null || true
+        return 1
+    fi
+    if grep -q '^FAIL' "$log"; then
+        echo "GUI TEST FAILED: $(grep -c '^FAIL' "$log") check(s)"
+        return 1
+    fi
+    echo "GUI TEST OK: $(grep -c '^PASS' "$log") checks"
+}
+
 if [ $# -eq 0 ]; then
-    sed -n '2,22p' "${BASH_SOURCE[0]}"
+    sed -n '2,23p' "${BASH_SOURCE[0]}"
     exit 1
 fi
 for stage in "$@"; do
@@ -225,6 +280,7 @@ for stage in "$@"; do
         build) stage_build ;;
         package) stage_package ;;
         check) stage_check ;;
+        gui) stage_gui ;;
         all) stage_source; stage_deps; stage_configure; stage_build; stage_package; stage_check ;;
         *) echo "unknown stage: $stage" >&2; exit 1 ;;
     esac

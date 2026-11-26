@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=coop_selftest
+X-Python-2-Compatible=false
+Name=Coop self-test
+Comment=Runs tests/krita_live_gui.py when started by a test launcher; does nothing otherwise.

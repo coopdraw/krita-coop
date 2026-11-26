@@ -48,6 +48,9 @@ jobs:
       - name: Check the packaged app
         run: bash coop/krita-build/mac/build.sh check
 
+      - name: Real brush strokes inside the app
+        run: bash coop/krita-build/mac/build.sh gui
+
       - name: Keep the test logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -55,6 +58,7 @@ jobs:
           name: check-logs
           path: |
             coop/tests/*.log
+            coop/tests/*.trace
             work/*.out
           retention-days: 7
           if-no-files-found: ignore
