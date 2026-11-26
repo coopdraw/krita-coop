@@ -18,7 +18,7 @@ The engine is built into the co-op build as one of Krita's own Python plugins an
 ## Get it
 
 * **Windows:** build it with the scripts in `krita-build\windows\`: [krita-build/README.md](krita-build/README.md). With the default build tree the result is `D:\krita-dev\pkg\krita-coop-x64-5.3.4.1\bin\krita.exe` (a self-contained folder; `krita.lnk` in it does the same), and the same as a zip for another Windows PC.
-* **macOS:** built by a GitHub workflow (Actions > macOS build), or on your own Mac with `krita-build/mac/build.sh`: [krita-build/MAC.md](krita-build/MAC.md). Not built successfully yet.
+* **macOS:** built by a GitHub workflow (Actions > macOS build), or on your own Mac with `krita-build/mac/build.sh`: [krita-build/MAC.md](krita-build/MAC.md). The Apple Silicon build passes the automatic tests on GitHub's Macs; it has not been used on a real Mac yet.
 
 The co-op build uses the same settings and brushes as a normal Krita 5.3 on the same computer. Everyone in a session needs the same version of the co-op build: a partner whose version speaks another protocol is refused.
 

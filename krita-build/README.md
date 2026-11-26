@@ -77,13 +77,13 @@ krita-build\windows\kritarunner-test.bat krita_integration          # real Krita
 powershell -ExecutionPolicy Bypass -File tests\run_live_gui.ps1     # real brush strokes; opens Krita for a minute
 ```
 
-`run_live_gui.ps1` is the one that proves the build: it runs inside the real application with the engine that was built in, paints with Krita's own brush engine in Wash and Build-up mode and with a mouse-driven stroke that stays open like a pen stroke, and checks that strokes are seen while they are painted, that pixels written while a stroke is held are not lost, and a whole host + guest session including undo (47 checks). It uses its own resource folder and does not change your Krita settings.
+`run_live_gui.ps1` is the one that proves the build: it runs inside the real application with the engine that was built in, paints with Krita's own brush engine in Wash and Build-up mode and with a mouse-driven stroke that stays open like a pen stroke, and checks that strokes are seen while they are painted, that pixels written while a stroke is held are not lost, and a whole host + guest session including undo (49 checks). The same test runs on macOS through `krita-build/mac/build.sh gui`; run it on both after changing the patch, because the two machines hit different timing. It uses its own resource folder and does not change your Krita settings.
 
 ## What the patch adds
 
 | Where | What |
 |---|---|
-| `KisImage::pauseProcessingForCoop()` | holds strokes and canvas updates between two jobs without ending the stroke; `unlock()` resumes |
+| `KisImage::pauseProcessingForCoop(timeoutMs)` | holds strokes and canvas updates between two jobs without ending the stroke; gives up and returns false if the running jobs don't finish in time; `unlock()` resumes |
 | `KisImage::setCoopDirtyTracking()`, `takeCoopDirtyRects()` | per-layer record of every `setDirty()` rect |
 | `KisImage::hasStrokesForCoop()`, `currentStrokeId()` | "is a stroke running, and which kind" without locking |
 | `KisIndirectPaintingSupport::tryLockTemporaryTargetForRead()` | non-blocking read lock on the Wash overlay |
@@ -92,4 +92,7 @@ powershell -ExecutionPolicy Bypass -File tests\run_live_gui.ps1     # real brush
 | `plugins/python/CMakeLists.txt`, `PythonPluginManager` | installs `krita_coop` with Krita's own plugins, on by default; a module described twice (an old copy in the user's folder) is listed once |
 | `KRITA_FORCE_PYTHON_PLUGINS` | environment variable that enables Python plugins for one run (used by the tests) |
 
-One thing to know when changing `pauseProcessingForCoop()`: it must not call `KisBusyWaitBroker::notifyWaitOnImageStarted()`. That one waits until the whole stroke has ended.
+Two things to know when changing this:
+
+* `pauseProcessingForCoop()` must not call `KisBusyWaitBroker::notifyWaitOnImageStarted()`. That one waits until the whole stroke has ended.
+* While a finished Wash stroke is merged into its layer, Krita relies on nobody requesting a canvas update for that layer: the merge holds the indirect-painting lock over several jobs, an update of the layer waits for that lock in a worker thread, and once all worker threads wait, the merge can never continue. That is why `Node.coopSetPixelData()` refuses to write during a merge (returns false), and why the pause has a time limit. Both `coopPause()` and `coopSetPixelData()` returning false mean "try again shortly".

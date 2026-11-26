@@ -1,13 +1,13 @@
 # The co-op build of Krita on macOS
 
-**Status: not built yet.** The build script and the GitHub workflow below follow KDE's own CI recipe for Krita on macOS, but have not completed a run. Update this page with what actually worked.
+**Status (2026-11-25): it builds on GitHub for Apple Silicon, and the built app passes the automatic tests on one of GitHub's Macs** (macOS 15, Apple Silicon): the engine tests, the real-API test, and the test with real brush strokes inside the app (49 checks: strokes shared while they are painted, pixels written while a stroke is held, a host + guest session with undo). It has not been used by a person on a real Mac yet, with a pen, or in a session with the Windows host. Building by hand on your own Mac has not been tried; it runs the same script.
 
 The result has to be the same thing as on Windows: Krita 5.3.4.1 (tag `v6.0.4.1`, Qt 5) + `krita-patches/coop-core.patch` + the engine `krita_coop/` built in. The engine's protocol version must match the host's, so build from the same commit of this repository as the Windows side.
 
 ## Getting a build from GitHub
 
-1. On the repository's page: **Actions > macOS build > Run workflow**. Choose `universal` (runs on every Mac) or `arm64` / `x86_64` (one kind of Mac, about half the build time).
-2. When the run has finished, open it and download **krita-coop-macos-…** under **Artifacts** (you have to be signed in to GitHub). Unzip it; inside is another zip with `krita.app`.
+1. A build is made by hand on the repository's page: **Actions > macOS build > Run workflow**. `arm64` is for Apple Silicon and takes about an hour and a half; `universal` also runs on Intel Macs and takes about twice as long. To use a build that already exists, skip this step.
+2. Open the newest green run of **macOS build** and download **krita-coop-macos-…** under **Artifacts** (you have to be signed in to GitHub; downloads are kept for 30 days). Unzip it; inside is another zip with `krita.app`.
 3. The app is not signed by a registered developer, so macOS blocks it at first. After moving `krita.app` where you want it, run once in Terminal:
    ```bash
    xattr -dr com.apple.quarantine /path/to/krita.app
@@ -19,6 +19,8 @@ The result has to be the same thing as on Windows: Krita 5.3.4.1 (tag `v6.0.4.1`
    ```
 
 The workflow is `.github/workflows/macos.yml`. It runs the stages of `krita-build/mac/build.sh` on one of GitHub's Apple Silicon machines, keeps a compiler cache between runs, and uploads the zipped app.
+
+A second workflow, **macOS check** (`.github/workflows/macos-check.yml`), tests an app that was already built, in about five minutes: it downloads the artifact of a build run and runs the `check` and `gui` stages on it. Run it after every build; the build itself only runs `check`.
 
 ## Building on your own Mac
 
@@ -41,20 +43,24 @@ What the stages do, and where it comes from:
 | `build` | `ninja install` into `_install` | |
 | `package` | Krita's `packaging/macos/macos-deploy.py` makes a self-contained `krita.app`; ad-hoc code signature; zip | KDE's CI, minus its signing and notarisation service |
 | `check` | starts the packaged `kritarunner` with a clean environment: is the engine built in, does the real-API test pass | this repository |
+| `gui` | starts the packaged app and runs `tests/krita_live_gui.py` in it (real brush strokes); if Krita stops making progress it prints what every thread is doing | this repository |
 
-## Things that needed care on Windows, or are guesses here
+## What the first runs showed
 
-* **A clean environment.** On Windows other compilers and a newer CMake on the `PATH` broke the build. The script takes Homebrew and MacPorts off the `PATH` and tells CMake to ignore their folders.
-* **Python.** KDE's CI unsets `VIRTUAL_ENV` before CMake so that Krita is built against the Python of the dependencies; the script does the same.
-* **Universal builds** are what KDE's toolchain file does on Apple Silicon; `ARCH=arm64` overrides it on the CMake command line. Whether that override is enough has not been tried.
-* **Dependencies.** The prebuilt ones are newer than the tag; on Windows that worked on 2026-11-24. Do not pass `-DBUILD_WITH_QT6`.
-* **Signing.** `codesign --force --deep --sign -` is a guess at the minimum; KDE signs every binary with its certificate.
-* **The patch** touches threading in Krita's stroke scheduler and has only been exercised on Windows.
+* **A clean environment.** The script takes Homebrew and MacPorts off the `PATH` and tells CMake to ignore their folders (on Windows, other compilers and a newer CMake on the `PATH` broke the build).
+* **Python.** KDE's CI unsets `VIRTUAL_ENV` before CMake so that Krita is built against the Python of the dependencies; the script does the same, and CMake then finds the dependencies' Python 3.13.
+* **Architecture.** KDE's toolchain file builds x86_64 + arm64 on Apple Silicon; `ARCH=arm64` overrides it on the CMake command line, and that works. `universal` and `x86_64` have not been tried.
+* **Dependencies.** The prebuilt ones are newer than the tag; that worked on 2026-11-25. Do not pass `-DBUILD_WITH_QT6`.
+* **Signing.** The app gets an ad-hoc signature (`codesign --force --deep --sign -`); KDE signs with its certificate and notarises. An ad-hoc signed app runs, but macOS quarantines a downloaded copy until the flag is removed (step 3 above).
+* **Compiler cache.** KDE's generated environment did not make CMake use ccache; the script passes it explicitly.
+* **kritarunner** on macOS imports its script only from Krita's own plugin folders, not from the working directory as on Windows; `check` copies the test scripts next to the engine inside the app for the run.
+* **Threads.** GitHub's Macs have 3 cores, which exposed a hang in the patch that a 16-thread PC had hidden (pixels written into a layer while a finished stroke was being merged into it). It is fixed, and it is the reason to run **macOS check** after every build.
+* **Runner labels.** `macos-14` no longer exists; the workflows use `macos-15`.
 
 ## Checking the result
 
 1. Start it. **Settings > Dockers > Coop Drawing** must be there without installing anything, and during a session the docker's status must end with "Live mode: ...".
 2. `build.sh check` (also run by the workflow): `tests/krita_bundled_probe.log` must say `native: True`, and `tests/krita_integration.log` must end with `RESULT: OK`.
-3. Engine tests, no Krita needed: `python3 -m unittest discover -s tests` (79 tests).
-4. Real brush strokes: `tests/krita_live_gui.py` has to run inside the application. On Windows `tests/run_live_gui.ps1` does that: it puts a tiny plugin `coop_selftest` next to Krita's own Python plugins, starts Krita with `KRITA_FORCE_PYTHON_PLUGINS=coop_selftest`, `COOP_SELFTEST_DIR=<tests folder>` and `--resource-location <an empty folder>`, waits for `DONE` in `tests/krita_live_gui.log`, and closes Krita. A shell version still has to be written for macOS.
-5. A real session with the Windows host, with a pen.
+3. Engine tests, no Krita needed: `python3 -m unittest discover -s tests` (81 tests).
+4. Real brush strokes: `build.sh gui` (or the **macOS check** workflow). It puts the tiny plugin `tests/selftest_plugin/coop_selftest` next to Krita's own Python plugins, starts the app with `KRITA_FORCE_PYTHON_PLUGINS=coop_selftest`, `COOP_SELFTEST_DIR=<tests folder>` and `--resource-location <an empty folder>`, waits for `DONE` in `tests/krita_live_gui.log`, and closes Krita. Every line of that log must start with PASS.
+5. A real session with the Windows host, with a pen. Nothing automatic covers this.
