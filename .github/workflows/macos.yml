@@ -1,0 +1,113 @@
+name: macOS build
+
+# Builds the co-op build of Krita for macOS with krita-build/mac/build.sh and offers the
+# zipped krita.app as a download on the run's page (Artifacts). Started by hand:
+# Actions > macOS build > Run workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "universal runs on every Mac but takes about twice as long to build"
+        type: choice
+        default: universal
+        options: [universal, arm64, x86_64]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-14            # Apple Silicon
+    timeout-minutes: 350         # GitHub stops a job after 6 hours
+    env:
+      WORK: ${{ github.workspace }}/work
+      ARCH: ${{ inputs.arch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: coop
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Engine tests
+        continue-on-error: true   # timing-sensitive on a small machine; the result is still shown
+        run: |
+          cd coop
+          python3 -m unittest discover -s tests
+
+      - name: Free disk space
+        run: |
+          df -h /
+          # other Xcode versions and the simulators are not needed and take tens of GB
+          current="$(xcode-select -p | sed 's#/Contents/Developer##')"
+          for x in /Applications/Xcode*.app; do
+            [ "$x" -ef "$current" ] || sudo rm -rf "$x"
+          done
+          sudo rm -rf /Library/Developer/CoreSimulator ~/Library/Developer/CoreSimulator || true
+          df -h /
+          xcodebuild -version
+          uname -m
+
+      - name: Source
+        run: bash coop/krita-build/mac/build.sh source
+
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: work/krita/ccache
+          key: ccache-${{ inputs.arch }}-${{ github.run_id }}
+          restore-keys: ccache-${{ inputs.arch }}-
+
+      - name: Dependencies
+        run: bash coop/krita-build/mac/build.sh deps
+
+      - name: Configure
+        run: bash coop/krita-build/mac/build.sh configure
+
+      - name: Build
+        run: bash coop/krita-build/mac/build.sh build
+
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: work/krita/ccache
+          key: ccache-${{ inputs.arch }}-${{ github.run_id }}
+
+      - name: Package
+        run: bash coop/krita-build/mac/build.sh package
+
+      - name: Upload the app
+        uses: actions/upload-artifact@v4
+        with:
+          name: krita-coop-macos-${{ inputs.arch }}
+          path: work/krita-coop-macos-*.zip
+          compression-level: 0
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: Check the packaged app
+        continue-on-error: true   # first runs: learn whether kritarunner works on a CI Mac at all
+        run: bash coop/krita-build/mac/build.sh check
+
+      - name: Keep logs when something failed
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: |
+            work/krita/_build/CMakeCache.txt
+            work/krita/_build/CMakeFiles/CMakeOutput.log
+            work/krita/_build/CMakeFiles/CMakeError.log
+            work/krita/_build/CMakeFiles/CMakeConfigureLog.yaml
+            work/krita/env
+            coop/tests/*.log
+          retention-days: 7
+          if-no-files-found: ignore

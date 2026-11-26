@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+# test output
+tests/*.log
+tests/*.trace
+# packages are built, not stored
+*.zip

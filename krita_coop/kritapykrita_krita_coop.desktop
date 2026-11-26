@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=krita_coop
+X-Python-2-Compatible=false
+X-Krita-Manual=Manual.html
+Name=Coop Drawing
+Comment=Draw together in real time with another Krita over the network (Drawpile-style co-op canvas).

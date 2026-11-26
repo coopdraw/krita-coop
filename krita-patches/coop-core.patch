@@ -1,0 +1,672 @@
+diff --git a/libs/image/kis_image.cc b/libs/image/kis_image.cc
+index 7d551f0..a1fdb4d 100644
+--- a/libs/image/kis_image.cc
++++ b/libs/image/kis_image.cc
+@@ -276,6 +276,12 @@ public:
+     KisUpdateScheduler scheduler;
+     QAtomicInt disableDirtyRequests;
+ 
++    // [co-op build] see KisImage::setCoopDirtyTracking()
++    QAtomicInt coopDirtyTracking;
++    QAtomicPointer<QThread> coopDirtySuppressedThread;
++    QMutex coopDirtyMutex;
++    QHash<QUuid, QVector<QRect>> coopDirtyRects;
++
+     KisCompositeProgressProxy compositeProgressProxy;
+ 
+     QPointF axesCenter;
+@@ -803,6 +809,69 @@ void KisImage::immediateLockForReadOnly()
+     m_d->lockedForReadOnly = true;
+ }
+ 
++void KisImage::pauseProcessingForCoop()
++{
++    if (!locked()) {
++        /**
++         * No requestStrokeEnd() here: the tools must keep their strokes open.
++         *
++         * And no notifyWaitOnImageStarted() either: its feedback callback waits (with a
++         * dialog) until the image is idle, i.e. until the whole stroke has ended. We only
++         * wait for the jobs that are running right now, so the "general wait" flag is the
++         * right one: it just tells the worker threads not to block on the GUI thread.
++         */
++        KisBusyWaitBroker::instance()->notifyGeneralWaitStarted();
++        m_d->scheduler.immediateLockForReadOnly();
++        KisBusyWaitBroker::instance()->notifyGeneralWaitEnded();
++        m_d->lockedForReadOnly = true;
++    }
++    m_d->lockCount++;
++}
++
++QString KisImage::currentStrokeId() const
++{
++    return m_d->scheduler.currentStrokeId();
++}
++
++bool KisImage::hasStrokesForCoop() const
++{
++    return m_d->scheduler.hasStrokes();
++}
++
++void KisImage::setCoopDirtyTracking(bool enabled)
++{
++    QMutexLocker l(&m_d->coopDirtyMutex);
++    m_d->coopDirtyTracking.storeRelease(enabled ? 1 : 0);
++    m_d->coopDirtyRects.clear();
++}
++
++bool KisImage::coopDirtyTracking() const
++{
++    return m_d->coopDirtyTracking.loadAcquire();
++}
++
++QVector<QPair<QUuid, QRect>> KisImage::takeCoopDirtyRects()
++{
++    QHash<QUuid, QVector<QRect>> log;
++    {
++        QMutexLocker l(&m_d->coopDirtyMutex);
++        log.swap(m_d->coopDirtyRects);
++    }
++
++    QVector<QPair<QUuid, QRect>> result;
++    for (auto it = log.constBegin(); it != log.constEnd(); ++it) {
++        Q_FOREACH (const QRect &rc, it.value()) {
++            result.append(qMakePair(it.key(), rc));
++        }
++    }
++    return result;
++}
++
++void KisImage::setCoopDirtySuppressedForCurrentThread(bool suppressed)
++{
++    m_d->coopDirtySuppressedThread.storeRelease(suppressed ? QThread::currentThread() : nullptr);
++}
++
+ void KisImage::unlock()
+ {
+     Q_ASSERT(locked());
+@@ -2424,6 +2493,30 @@ void KisImage::KisImagePrivate::
+ 
+ void KisImage::requestProjectionUpdate(KisNode *node, const QVector<QRect> &rects, KisProjectionUpdateFlags flags)
+ {
++    /**
++     * [co-op build] Log which node got dirty where. It is done before the filters,
++     * because the pixels have changed even when the update itself is suspended.
++     */
++    if (m_d->coopDirtyTracking.loadRelaxed() && node && !rects.isEmpty() &&
++        m_d->coopDirtySuppressedThread.loadRelaxed() != QThread::currentThread()) {
++
++        const QUuid id = node->uuid();
++        QMutexLocker l(&m_d->coopDirtyMutex);
++        if (m_d->coopDirtyTracking.loadRelaxed()) {
++            QVector<QRect> &log = m_d->coopDirtyRects[id];
++            if (log.size() + rects.size() > 128) {
++                // too many pieces: keep one bounding rect, the reader re-checks the pixels anyway
++                QRect bounds;
++                Q_FOREACH (const QRect &rc, log) bounds |= rc;
++                Q_FOREACH (const QRect &rc, rects) bounds |= rc;
++                log.clear();
++                log.append(bounds);
++            } else {
++                log << rects;
++            }
++        }
++    }
++
+     /**
+      * We iterate through the filters in a reversed way. It makes the most nested filters
+      * to execute first.
+diff --git a/libs/image/kis_image.h b/libs/image/kis_image.h
+index 71a7abb..00b6842 100644
+--- a/libs/image/kis_image.h
++++ b/libs/image/kis_image.h
+@@ -9,6 +9,9 @@
+ 
+ #include <QObject>
+ #include <QString>
++#include <QUuid>
++#include <QPair>
++#include <QVector>
+ #include <QPainter>
+ #include <QRect>
+ 
+@@ -172,6 +175,54 @@ public:
+      */
+     void immediateLockForReadOnly();
+ 
++    /**
++     * [co-op build] Pause the execution of strokes and projection updates between
++     * two jobs, *without* asking the tools to end their strokes (lock() and
++     * barrierLock() emit sigStrokeEndRequested(), which would e.g. commit an open
++     * transform).
++     *
++     * Waits only for the jobs that are running right now, so it also works in the
++     * middle of a brush stroke. While paused, the caller may read and write paint
++     * devices from the GUI thread without racing against the stroke. Keep the pause
++     * short (a few milliseconds) and never block on anything a paused job may hold.
++     *
++     * Pair with unlock(). The LoD planes are not reset by that unlock().
++     */
++    void pauseProcessingForCoop();
++
++    /**
++     * [co-op build] id of the stroke that is being executed right now
++     * (e.g. "FREEHAND_STROKE"), or an empty string when there is none.
++     */
++    QString currentStrokeId() const;
++
++    /**
++     * [co-op build] true while a stroke (a brush stroke, an open transform, a filter...)
++     * is queued, open or still executing a job. Unlike isIdle() it ignores projection
++     * updates and never locks anything.
++     */
++    bool hasStrokesForCoop() const;
++
++    /**
++     * [co-op build] Per-node log of the rects passed to requestProjectionUpdate()
++     * (i.e. of every KisNode::setDirty() call), whatever thread they come from and
++     * whether or not a projection-updates filter drops them afterwards. A co-op
++     * session uses it to learn which parts of which layers have just been changed.
++     */
++    void setCoopDirtyTracking(bool enabled);
++    bool coopDirtyTracking() const;
++
++    /**
++     * [co-op build] Returns the rects logged since the last call and clears the log.
++     */
++    QVector<QPair<QUuid, QRect>> takeCoopDirtyRects();
++
++    /**
++     * [co-op build] While set, setDirty() calls made by the *calling thread* are
++     * not logged (used when the session itself writes other people's pixels).
++     */
++    void setCoopDirtySuppressedForCurrentThread(bool suppressed);
++
+     /**
+      * Unlocks the image and starts/resumes all the pending internal jobs. If the image
+      * has been locked for a non-readOnly access, then all the internal caches of the image
+diff --git a/libs/image/kis_indirect_painting_support.cpp b/libs/image/kis_indirect_painting_support.cpp
+index acfc4d1..0cde669 100644
+--- a/libs/image/kis_indirect_painting_support.cpp
++++ b/libs/image/kis_indirect_painting_support.cpp
+@@ -92,6 +92,17 @@ void KisIndirectPaintingSupport::unlockTemporaryTarget() const
+     d->finalMergeInProgress = false;
+ }
+ 
++bool KisIndirectPaintingSupport::tryLockTemporaryTargetForRead() const
++{
++    return d->lock.tryLockForRead();
++}
++
++void KisIndirectPaintingSupport::unlockTemporaryTargetAfterRead() const
++{
++    // not unlockTemporaryTarget(): a reader must not touch finalMergeInProgress
++    d->lock.unlock();
++}
++
+ KisPaintDeviceSP KisIndirectPaintingSupport::temporaryTarget() const
+ {
+     return d->temporaryTarget;
+diff --git a/libs/image/kis_indirect_painting_support.h b/libs/image/kis_indirect_painting_support.h
+index 970c616..d21279a 100644
+--- a/libs/image/kis_indirect_painting_support.h
++++ b/libs/image/kis_indirect_painting_support.h
+@@ -63,6 +63,17 @@ public:
+ 
+     KisPaintDeviceSP temporaryTarget() const;
+ 
++    /**
++     * [co-op build] Lock the temporary target for reading without blocking.
++     *
++     * Returns false while the final merge of a stroke holds the lock. That lock
++     * is kept across several stroke jobs, so a thread that has paused the image's
++     * scheduler (KisImage::pauseProcessingForCoop()) must never block on it.
++     * Pair every successful call with unlockTemporaryTargetAfterRead().
++     */
++    bool tryLockTemporaryTargetForRead() const;
++    void unlockTemporaryTargetAfterRead() const;
++
+     virtual bool supportsNonIndirectPainting() const;
+ 
+     /**
+diff --git a/libs/image/kis_strokes_queue.cpp b/libs/image/kis_strokes_queue.cpp
+index 5da6871..37e2366 100644
+--- a/libs/image/kis_strokes_queue.cpp
++++ b/libs/image/kis_strokes_queue.cpp
+@@ -740,6 +740,14 @@ KUndo2MagicString KisStrokesQueue::currentStrokeName() const
+     return m_d->strokesQueue.head()->name();
+ }
+ 
++QString KisStrokesQueue::currentStrokeId() const
++{
++    QMutexLocker locker(&m_d->mutex);
++    if(m_d->strokesQueue.isEmpty()) return QString();
++
++    return m_d->strokesQueue.head()->id();
++}
++
+ bool KisStrokesQueue::hasOpenedStrokes() const
+ {
+     QMutexLocker locker(&m_d->mutex);
+diff --git a/libs/image/kis_strokes_queue.h b/libs/image/kis_strokes_queue.h
+index 3c31737..31c141a 100644
+--- a/libs/image/kis_strokes_queue.h
++++ b/libs/image/kis_strokes_queue.h
+@@ -62,6 +62,8 @@ public:
+ 
+     qint32 sizeMetric() const;
+     KUndo2MagicString currentStrokeName() const;
++    /// [co-op build] id of the stroke at the head of the queue ("FREEHAND_STROKE", ...), empty if none
++    QString currentStrokeId() const;
+     bool hasOpenedStrokes() const;
+ 
+     bool wrapAroundModeSupported() const;
+diff --git a/libs/image/kis_update_scheduler.cpp b/libs/image/kis_update_scheduler.cpp
+index 8a37ce5..be3a170 100644
+--- a/libs/image/kis_update_scheduler.cpp
++++ b/libs/image/kis_update_scheduler.cpp
+@@ -292,6 +292,20 @@ void KisUpdateScheduler::immediateLockForReadOnly()
+     m_d->updaterContext.waitForDone();
+ }
+ 
++QString KisUpdateScheduler::currentStrokeId() const
++{
++    return m_d->strokesQueue.currentStrokeId();
++}
++
++bool KisUpdateScheduler::hasStrokes()
++{
++    if (!m_d->strokesQueue.isEmpty()) return true;
++
++    qint32 numMergeJobs, numStrokeJobs;
++    m_d->updaterContext.getJobsSnapshot(numMergeJobs, numStrokeJobs);
++    return numStrokeJobs > 0;
++}
++
+ void KisUpdateScheduler::unlock(bool resetLodLevels)
+ {
+     if (resetLodLevels) {
+diff --git a/libs/image/kis_update_scheduler.h b/libs/image/kis_update_scheduler.h
+index c6ee974..65c5285 100644
+--- a/libs/image/kis_update_scheduler.h
++++ b/libs/image/kis_update_scheduler.h
+@@ -62,6 +62,13 @@ public:
+      */
+     void immediateLockForReadOnly();
+ 
++    /// [co-op build] id of the stroke that is being executed now, empty if none
++    QString currentStrokeId() const;
++
++    /// [co-op build] true if a stroke is queued, open or still has a job running
++    /// (projection updates don't count, unlike in isIdle())
++    bool hasStrokes();
++
+     /**
+      * Unblocks the process and calls processQueues()
+      *
+diff --git a/libs/libkis/Document.cpp b/libs/libkis/Document.cpp
+index e1cfd9a..44acfe6 100644
+--- a/libs/libkis/Document.cpp
++++ b/libs/libkis/Document.cpp
+@@ -834,6 +834,69 @@ bool Document::tryBarrierLock()
+     return d->document->image()->tryBarrierLock();
+ }
+ 
++int Document::coopApiVersion() const
++{
++    return 1;
++}
++
++void Document::coopSetTracking(bool enabled)
++{
++    if (!d->document || !d->document->image()) return;
++    d->document->image()->setCoopDirtyTracking(enabled);
++}
++
++QByteArray Document::coopTakeDirty()
++{
++    QByteArray ba;
++    if (!d->document || !d->document->image()) return ba;
++
++    const QVector<QPair<QUuid, QRect>> log = d->document->image()->takeCoopDirtyRects();
++    ba.reserve(log.size() * 32);
++
++    Q_FOREACH (const auto &item, log) {
++        ba.append(item.first.toRfc4122());
++        const qint32 v[4] = {item.second.x(), item.second.y(), item.second.width(), item.second.height()};
++        for (int k = 0; k < 4; k++) {
++            const quint32 u = quint32(v[k]);
++            const char bytes[4] = {char(u & 0xff), char((u >> 8) & 0xff), char((u >> 16) & 0xff), char((u >> 24) & 0xff)};
++            ba.append(bytes, 4);
++        }
++    }
++    return ba;
++}
++
++bool Document::coopIsIdle() const
++{
++    if (!d->document || !d->document->image()) return false;
++    return d->document->image()->isIdle();
++}
++
++bool Document::coopHasStrokes() const
++{
++    if (!d->document || !d->document->image()) return false;
++    return d->document->image()->hasStrokesForCoop();
++}
++
++QString Document::coopActivity() const
++{
++    if (!d->document || !d->document->image()) return QString();
++    return d->document->image()->currentStrokeId();
++}
++
++bool Document::coopPause()
++{
++    if (!d->document || !d->document->image()) return false;
++    d->document->image()->pauseProcessingForCoop();
++    return true;
++}
++
++void Document::coopResume()
++{
++    if (!d->document || !d->document->image()) return;
++    if (!d->document->image()->locked()) return;
++    d->document->image()->unlock();
++}
++
+ void Document::refreshProjection()
+ {
+     if (!d->document || !d->document->image()) return;
+diff --git a/libs/libkis/Document.h b/libs/libkis/Document.h
+index 240d609..e837c69 100644
+--- a/libs/libkis/Document.h
++++ b/libs/libkis/Document.h
+@@ -1049,6 +1049,63 @@ newDoc.setGridConfig(newDocGrid)
+      */
+     bool setAudioTracks(const QList<QString> files) const;
+ 
++    /**
++     * @brief [co-op build] coopApiVersion
++     * @return the version of the coop* functions of Document and Node (currently 1).
++     * These functions exist only in the co-op build of Krita; a script should test for
++     * them with hasattr().
++     */
++    int coopApiVersion() const;
++
++    /**
++     * @brief [co-op build] coopSetTracking starts or stops recording which parts of which
++     * nodes are changed (by strokes, filters, undo, scripts, ...). Starting clears the record.
++     */
++    void coopSetTracking(bool enabled);
++
++    /**
++     * @brief [co-op build] coopTakeDirty returns what was recorded since the last call and
++     * clears the record.
++     * @return packed records of 32 bytes each: the node's unique id (16 bytes, as
++     * QUuid::toRfc4122()) followed by x, y, width and height as little-endian int32.
++     */
++    QByteArray coopTakeDirty();
++
++    /**
++     * @brief [co-op build] coopIsIdle
++     * @return true if no stroke, tool action or canvas update is running or queued.
++     * Unlike tryBarrierLock() + unlock() it doesn't reset any caches of the image.
++     */
++    bool coopIsIdle() const;
++
++    /**
++     * @brief [co-op build] coopHasStrokes
++     * @return true while a stroke or tool action (a brush stroke, an open transform, a
++     * filter...) is queued, open or still running. Canvas updates don't count.
++     */
++    bool coopHasStrokes() const;
++
++    /**
++     * @brief [co-op build] coopActivity
++     * @return the id of the stroke that is running right now, e.g. "FREEHAND_STROKE"
++     * for a brush stroke; an empty string if there is none.
++     */
++    QString coopActivity() const;
++
++    /**
++     * @brief [co-op build] coopPause pauses the running stroke (if any) and all canvas
++     * updates between two of their jobs, without ending the stroke. While paused, pixels
++     * can be read and written without racing against the stroke. Keep it short, and
++     * always call coopResume() afterwards.
++     * @return false if there is no image
++     */
++    bool coopPause();
++
++    /**
++     * @brief [co-op build] coopResume ends a pause started with coopPause().
++     */
++    void coopResume();
++
+ private:
+ 
+     friend class Krita;
+diff --git a/libs/libkis/Node.cpp b/libs/libkis/Node.cpp
+index b1c1078..b6e8c75 100644
+--- a/libs/libkis/Node.cpp
++++ b/libs/libkis/Node.cpp
+@@ -66,6 +66,9 @@
+ 
+ #include "LibKisUtils.h"
+ #include <kis_layer_utils.h>
++#include <kis_indirect_painting_support.h>
++#include <kis_painter.h>
++#include <kis_paint_device.h>
+ 
+ #include "PaintingResources.h"
+ #include "KisMainWindow.h"
+@@ -610,6 +613,82 @@ bool Node::setPixelData(QByteArray value, int x, int y, int w, int h)
+     return true;
+ }
+ 
++QByteArray Node::coopPixelData(int x, int y, int w, int h) const
++{
++    QByteArray ba;
++
++    if (!d->node || w <= 0 || h <= 0) return ba;
++
++    KisPaintDeviceSP dev = d->node->paintDevice();
++    if (!dev) return ba;
++
++    const QRect rc(x, y, w, h);
++    KisIndirectPaintingSupport *indirect =
++        dynamic_cast<KisIndirectPaintingSupport*>(d->node.data());
++
++    if (indirect) {
++        // the final merge of a stroke keeps this lock over several jobs: never wait for it
++        if (!indirect->tryLockTemporaryTargetForRead()) return ba;
++
++        KisPaintDeviceSP overlay = indirect->temporaryTarget();
++        if (overlay && overlay != dev) {
++            // the same as KisPaintLayer::copyOriginalToProjection()
++            KisPaintDeviceSP scratch = new KisPaintDevice(dev->colorSpace());
++            scratch->setDefaultPixel(dev->defaultPixel());
++            KisPainter::copyAreaOptimized(rc.topLeft(), dev, scratch, rc);
++            {
++                KisPainter gc(scratch);
++                indirect->setupTemporaryPainter(&gc);
++                gc.bitBlt(rc.topLeft(), overlay, rc);
++            }
++            indirect->unlockTemporaryTargetAfterRead();
++
++            ba.resize(w * h * scratch->pixelSize());
++            scratch->readBytes(reinterpret_cast<quint8*>(ba.data()), x, y, w, h);
++            return ba;
++        }
++        indirect->unlockTemporaryTargetAfterRead();
++    }
++
++    ba.resize(w * h * dev->pixelSize());
++    dev->readBytes(reinterpret_cast<quint8*>(ba.data()), x, y, w, h);
++    return ba;
++}
++
++bool Node::coopOverlayActive() const
++{
++    if (!d->node) return false;
++
++    KisIndirectPaintingSupport *indirect =
++        dynamic_cast<KisIndirectPaintingSupport*>(d->node.data());
++
++    return indirect && indirect->hasTemporaryTarget();
++}
++
++bool Node::coopSetPixelData(QByteArray value, int x, int y, int w, int h)
++{
++    if (!d->node || w <= 0 || h <= 0) return false;
++
++    KisPaintDeviceSP dev = d->node->paintDevice();
++    if (!dev) return false;
++
++    if (value.length() < w * h * (int)dev->colorSpace()->pixelSize()) {
++        qWarning() << "Node::coopSetPixelData: not enough data to write to the paint device";
++        return false;
++    }
++
++    dev->writeBytes((const quint8*)value.constData(), x, y, w, h);
++
++    // invalidates the device's caches and asks the image for an asynchronous update
++    // of this rect only; the co-op dirty log must not see our own write
++    KisImageSP image = d->image.toStrongRef();
++    if (image) image->setCoopDirtySuppressedForCurrentThread(true);
++    dev->setDirty(QRect(x, y, w, h));
++    if (image) image->setCoopDirtySuppressedForCurrentThread(false);
++
++    return true;
++}
++
+ QRect Node::bounds() const
+ {
+     if (!d->node) return QRect();
+diff --git a/libs/libkis/Node.h b/libs/libkis/Node.h
+index ce63d3f..3bbdf40 100644
+--- a/libs/libkis/Node.h
++++ b/libs/libkis/Node.h
+@@ -447,6 +447,39 @@ public Q_SLOTS:
+      */
+     bool setPixelData(QByteArray value, int x, int y, int w, int h);
+ 
++    /**
++     * @brief [co-op build] coopPixelData reads the layer's pixels as they will be once the
++     * stroke that is being painted right now is finished.
++     *
++     * Brushes in the "Wash" painting mode paint into a temporary device that is merged into
++     * the layer only when the stroke ends, so pixelData() doesn't see the stroke before that.
++     * This function composes that temporary device over a copy of the pixels, exactly like
++     * Krita does it for the canvas. Without such a stroke it returns the same as pixelData().
++     *
++     * It is safe to call while a stroke is running.
++     *
++     * @return the pixel data, or an empty array if the node has no paint device or if
++     * the stroke is being merged into the layer at this very moment (try again later).
++     */
++    QByteArray coopPixelData(int x, int y, int w, int h) const;
++
++    /**
++     * @brief [co-op build] coopOverlayActive
++     * @return true while a stroke paints into a temporary device over this node ("Wash"
++     * mode), i.e. while coopPixelData() and pixelData() may differ.
++     */
++    bool coopOverlayActive() const;
++
++    /**
++     * @brief [co-op build] coopSetPixelData writes pixels like setPixelData(), and then
++     * schedules an asynchronous update of just that area of the canvas. It doesn't wait
++     * for anything, and the write is not reported by Document::coopTakeDirty().
++     *
++     * While a stroke is running, call it only between Document::coopPause() and
++     * Document::coopResume().
++     */
++    bool coopSetPixelData(QByteArray value, int x, int y, int w, int h);
++
+     /**
+      * @brief bounds return the exact bounds of the node's paint device
+      * @return the bounds, or an empty QRect if the node has no paint device or is empty.
+diff --git a/plugins/extensions/pykrita/plugin/PythonPluginManager.cpp b/plugins/extensions/pykrita/plugin/PythonPluginManager.cpp
+index 730c0f2..dae9b39 100644
+--- a/plugins/extensions/pykrita/plugin/PythonPluginManager.cpp
++++ b/plugins/extensions/pykrita/plugin/PythonPluginManager.cpp
+@@ -298,7 +298,30 @@ void PythonPluginManager::scanPlugins()
+ 
+             verifyDependenciesSetStatus(plugin);
+ 
+-            plugin.m_enabled = pluginSettings.readEntry(QString("enable_") + plugin.moduleName(), false);
++            // [co-op build] The same module can be described twice: once by this build and once
++            // by an older copy left in the user's resource folder. Python imports only one of
++            // them (the build's own comes first on sys.path), so list and load it only once.
++            bool alreadyListed = false;
++            for (const PythonPlugin &other : std::as_const(m_plugins)) {
++                if (other.moduleName() == plugin.moduleName()) {
++                    alreadyListed = true;
++                    break;
++                }
++            }
++            if (alreadyListed) continue;
++
++            // [co-op build] The co-op plugin is part of this build and on unless switched off.
++            const bool enabledByDefault = plugin.moduleName() == QLatin1String("krita_coop");
++            plugin.m_enabled = pluginSettings.readEntry(QString("enable_") + plugin.moduleName(), enabledByDefault);
++
++            // [co-op build] Plugins named in KRITA_FORCE_PYTHON_PLUGINS (comma-separated module
++            // names) are enabled for this run only, without touching the configuration.
++            // Automated tests use it to run a script inside the real application.
++            if (!plugin.m_enabled) {
++                const QStringList forced =
++                    QString::fromLocal8Bit(qgetenv("KRITA_FORCE_PYTHON_PLUGINS")).split(',', Qt::SkipEmptyParts);
++                plugin.m_enabled = forced.contains(plugin.moduleName());
++            }
+ 
+             m_plugins.append(plugin);
+         }
+diff --git a/plugins/extensions/pykrita/sip/krita/Document.sip b/plugins/extensions/pykrita/sip/krita/Document.sip
+index 44c30c6..8818cd2 100644
+--- a/plugins/extensions/pykrita/sip/krita/Document.sip
++++ b/plugins/extensions/pykrita/sip/krita/Document.sip
+@@ -133,6 +133,15 @@ public Q_SLOTS:
+     QList<QString> audioTracks() const;
+     bool setAudioTracks(const QList<QString> files) const;
+ 
++    int coopApiVersion() const;
++    void coopSetTracking(bool enabled);
++    QByteArray coopTakeDirty();
++    bool coopIsIdle() const;
++    bool coopHasStrokes() const;
++    QString coopActivity() const;
++    bool coopPause();
++    void coopResume();
++
+ private:
+ 
+ };
+diff --git a/plugins/extensions/pykrita/sip/krita/Node.sip b/plugins/extensions/pykrita/sip/krita/Node.sip
+index f3247b4..f3b2272 100644
+--- a/plugins/extensions/pykrita/sip/krita/Node.sip
++++ b/plugins/extensions/pykrita/sip/krita/Node.sip
+@@ -65,6 +65,9 @@ public Q_SLOTS:
+     QByteArray pixelDataAtTime(int x, int y, int w, int h, int time) const;
+     QByteArray projectionPixelData(int x, int y, int w, int h) const;
+     bool setPixelData(QByteArray value, int x, int y, int w, int h);
++    QByteArray coopPixelData(int x, int y, int w, int h) const;
++    bool coopOverlayActive() const;
++    bool coopSetPixelData(QByteArray value, int x, int y, int w, int h);
+     QRect bounds() const;
+     void move(int x, int y);
+     QPoint position() const;
+diff --git a/plugins/python/CMakeLists.txt b/plugins/python/CMakeLists.txt
+index 4260fa1..ffa3d31 100644
+--- a/plugins/python/CMakeLists.txt
++++ b/plugins/python/CMakeLists.txt
+@@ -80,6 +80,8 @@ install_pykrita_plugin(mutator)
+ install_pykrita_plugin(channels2layers)
+ install_pykrita_plugin(photobash_images)
+ install_pykrita_plugin(workflow_buttons)
++# [co-op build] the co-op drawing plugin; its files are copied here from the krita-coop repository
++install_pykrita_plugin(krita_coop)
+ 
+ # if(PYTHON_VERSION_MAJOR VERSION_EQUAL 3)
+ #     install_pykrita_plugin(cmake_utils)

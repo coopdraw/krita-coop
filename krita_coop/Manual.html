@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Coop Drawing</title></head>
+<body>
+<h1>Coop Drawing</h1>
+<p>Draw on the same canvas as someone else's Krita in real time, in the spirit of Drawpile.</p>
+
+<h2>Getting started</h2>
+<ol>
+<li>Open the docker: <b>Settings &gt; Dockers &gt; Coop Drawing</b>.</li>
+<li><b>Host:</b> open the document you want to share, type your name, and press <b>Start hosting</b>.
+    Press <b>Copy invite</b> and send the address and code to your partner.
+    The first time, Windows may ask whether Krita may accept network connections. Allow it for private networks.</li>
+<li><b>Join:</b> on the other computer, open the <b>Join</b> tab, enter the address and code, and press <b>Join</b>.
+    A new document opens with the host's layers.</li>
+</ol>
+<p>Everyone needs the same version of the co-op build of Krita; a partner whose version speaks another protocol is refused.</p>
+
+<h2>Drawing together</h2>
+<ul>
+<li>Every layer is shared. Everyone can draw on, erase, fill, transform, lock, rename, reorder and delete
+    any layer, including the same layer at the same time.</li>
+<li>When two people paint the very same pixels at the same moment, the change that reaches the host last
+    wins for those pixels. Everything else from both strokes is kept.</li>
+<li>Strokes are shared while they are painted, and your partner's paint appears while you are drawing.
+    Three things wait until you finish what you are doing: paint under your own stroke in progress,
+    changes to a layer you have open in Transform, Move or a filter dialog, and layers being added, deleted or moved.</li>
+<li>Instant Preview is switched off during a session and switched back on afterwards.</li>
+<li>Hiding a layer is personal: it only hides it for you.</li>
+</ul>
+
+<h2>Undo</h2>
+<p>In the shared document, Ctrl+Z (Cmd+Z on a Mac), Edit &gt; Undo and the toolbar button undo <b>your own</b>
+last change, for everyone. Your partner's work is never undone, and paint they put on top of yours stays.
+It doesn't matter who undoes first: if everyone undoes everything, the canvas is back to how it started.
+Redo works the same way. The docker also has <b>Undo mine</b> and <b>Redo mine</b>
+buttons, plus a count of your undo steps.</p>
+<ul>
+<li><b>What Ctrl+Z skips:</b> layer changes (add, delete, move, rename, opacity...), selections, and edits on layers
+    that aren't shared. Ctrl+Z stops there with a message; press it again to undo your painting before them.
+    An action that also deleted layers, such as Merge Down, can't be undone during a session.
+    <b>Deleting a shared layer is final for everyone.</b></li>
+<li><b>Not undoable:</b> what was on the canvas when the session started, and a new layer's first content.</li>
+<li><b>Tools still open:</b> with Transform, Move or a filter dialog still open, finish or cancel it before
+    pressing Ctrl+Z.</li>
+<li><b>Limits:</b> 100 steps per person. Resizing the canvas or switching animation frames clears your undo
+    history. The Undo History docker is greyed out for the shared document.</li>
+<li><b>After the session:</b> undo works for what you do from then on, but not for steps from the session.
+    Save and reopen the document to get a clean history.</li>
+</ul>
+
+<h2>Good to know</h2>
+<ul>
+<li>Only paint layers and groups are shared. Vector, fill, filter, file and clone layers, masks, layer
+    styles, selections and animation frames other than the current one stay local.</li>
+<li>The host controls the canvas size.</li>
+<li>Connections are protected by the session code but are not encrypted. Use a network you trust, or a
+    VPN such as Tailscale or ZeroTier. That is also the easiest way to draw together over the internet.</li>
+</ul>
+</body>
+</html>
