@@ -52,7 +52,7 @@ What the stages do, and where it comes from:
 * **Architecture.** KDE's toolchain file builds x86_64 + arm64 on Apple Silicon; `ARCH=arm64` overrides it on the CMake command line, and that works. `universal` and `x86_64` have not been tried.
 * **Dependencies.** The prebuilt ones are newer than the tag; that worked on 2026-11-25. Do not pass `-DBUILD_WITH_QT6`.
 * **Signing.** The app gets an ad-hoc signature (`codesign --force --deep --sign -`); KDE signs with its certificate and notarises. An ad-hoc signed app runs, but macOS quarantines a downloaded copy until the flag is removed (step 3 above).
-* **Compiler cache.** KDE's generated environment did not make CMake use ccache; the script passes it explicitly.
+* **Compiler cache.** It does not work yet: KDE's generated environment did not make CMake use ccache, and passing it to CMake explicitly did not either (ccache reports 0 calls after a build). Every build is a full one.
 * **kritarunner** on macOS imports its script only from Krita's own plugin folders, not from the working directory as on Windows; `check` copies the test scripts next to the engine inside the app for the run.
 * **Threads.** GitHub's Macs have 3 cores, which exposed a hang in the patch that a 16-thread PC had hidden (pixels written into a layer while a finished stroke was being merged into it). It is fixed, and it is the reason to run **macOS check** after every build.
 * **Runner labels.** `macos-14` no longer exists; the workflows use `macos-15`.
