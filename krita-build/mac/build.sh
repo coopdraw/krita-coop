@@ -140,10 +140,21 @@ stage_build() {
     cd _build
     export CCACHE_DIR="$SRC/ccache/krita"
     ninja install
-    if command -v ccache >/dev/null 2>&1; then
-        ccache -s || true
-    fi
     ls -d "$SRC/_install/bin/krita.app"
+}
+
+# How much of the last build came out of the compiler cache. (Its own stage: printed at the
+# end of the long build step, the numbers got lost from the log.)
+stage_cachestats() {
+    say "Compiler cache"
+    cd "$SRC"
+    enter_env
+    export CCACHE_DIR="$SRC/ccache/krita"
+    if command -v ccache >/dev/null 2>&1; then
+        ccache -s
+    else
+        echo "ccache is not on the PATH"
+    fi
 }
 
 stage_package() {
@@ -296,6 +307,7 @@ for stage in "$@"; do
         build) stage_build ;;
         package) stage_package ;;
         check) stage_check ;;
+        cachestats) stage_cachestats ;;
         gui) stage_gui ;;
         all) stage_source; stage_deps; stage_configure; stage_build; stage_package; stage_check ;;
         *) echo "unknown stage: $stage" >&2; exit 1 ;;

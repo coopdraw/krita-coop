@@ -74,6 +74,10 @@ jobs:
       - name: Build
         run: bash coop/krita-build/mac/build.sh build
 
+      - name: Compiler cache statistics
+        if: always()
+        run: bash coop/krita-build/mac/build.sh cachestats || true
+
       - name: Save compiler cache
         if: always()
         uses: actions/cache/save@v4
