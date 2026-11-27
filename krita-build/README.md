@@ -9,7 +9,7 @@ This page is for Windows. For macOS see [MAC.md](MAC.md).
 
 ## Windows
 
-Everything lives in one build tree, `D:\krita-dev` by default (set `KRITA_DEV` to use another short path without spaces). Nothing is installed system-wide. The first build takes about 35 minutes on an 8-core laptop and the tree ends up at about 16 GB with the package.
+Everything lives in one build tree: by default the folder `krita-dev` in this repository, which git ignores (set `KRITA_DEV` to use another place; no spaces, and not much deeper than this, because the longest path inside the tree is about 170 characters and Windows tools stop at 260). Nothing is installed system-wide. The tree cannot simply be moved: the build folder and the Python environment store their location, see "Moving the build tree" below. The first build takes about 35 minutes on an 8-core laptop and the tree ends up at about 16 GB with the package.
 
 | In the build tree | What |
 |---|---|
@@ -38,24 +38,33 @@ After **any** change, to the engine or to the C++ source, run `build.bat` and th
 After changing the C++ source, export the patch again (the engine is not part of the patch):
 
 ```bat
-cd /d D:\krita-dev\krita
+cd /d <build tree>\krita
 git diff > <this repository>\krita-patches\coop-core.patch
 ```
 
 Windows Firewall rules name the program's full path. Hosting needs an inbound TCP allow rule for `pkg\krita-coop-x64-5.3.4.1\bin\krita.exe` on every network profile partners connect through. If Windows asks, tick both private and public networks; a "block" rule made by answering that prompt with private only overrides allow rules for the public profile.
 
+### Moving the build tree
+
+Done once, on 2026-11-27 (from another drive into this repository). The package in `pkg\` can be copied anywhere; the tree needs these steps:
+
+1. Close Krita. Copy the tree without `b_krita\` (the build folder stores its location and has to be made again) and without the `env*.bat` and `base-env*.bat` files KDE's setup generated (they hold the old paths and are not used; `kenv.bat` replaces them).
+2. Delete `PythonEnv\` in the copy and run `krita-build\windows\setup-deps.bat python`: it makes the Python environment again without touching the dependencies. The dependencies in `_install\`, the tools and Krita's source do not store their location.
+3. `configure.bat`, then `build.bat` (a full build, about 35 minutes), the tests, then `package.bat`.
+4. Windows Firewall rules name the program's full path (see above): point them at the new `pkg\...\bin\krita.exe`.
+
 ### From scratch
 
 Needs Git for Windows and 7-Zip.
 
-1. Tools, unpacked into `D:\krita-dev\tools\` as `llvm-mingw`, `cmake`, `ninja`, `Python-3.13`:
+1. Tools, unpacked into `krita-dev\tools\` as `llvm-mingw`, `cmake`, `ninja`, `Python-3.13`:
    * <https://github.com/mstorsjo/llvm-mingw/releases/download/20251118/llvm-mingw-20251118-ucrt-x86_64.zip>
    * <https://github.com/Kitware/CMake/releases/download/v3.31.8/cmake-3.31.8-windows-x86_64.zip> (CMake 4 does not work)
    * <https://github.com/ninja-build/ninja/releases/download/v1.12.1/ninja-win.zip>
    * Python 3.13: the `tools` folder of <https://api.nuget.org/v3-flatcontainer/python/3.13.17/python.3.13.17.nupkg> (a zip). It must be 3.13.
 2. Sources:
    ```bat
-   cd /d D:\krita-dev
+   cd /d <this repository>\krita-dev
    git clone https://invent.kde.org/packaging/krita-deps-management.git
    git clone https://invent.kde.org/packaging/krita-ci-utilities.git krita-deps-management/ci-utilities
    git clone --branch v6.0.4.1 --depth 1 https://invent.kde.org/graphics/krita.git krita

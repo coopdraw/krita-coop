@@ -1,3 +1,5 @@
+# the Windows build tree (Krita's source, dependencies, build, package): about 16 GB, made by krita-build\windows
+/krita-dev/
 __pycache__/
 *.pyc
 # test output

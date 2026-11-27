@@ -7,7 +7,8 @@
 # KRITA_FORCE_PYTHON_PLUGINS, so your Krita settings are not changed.
 # A Krita window opens for the duration of the test (about a minute) and is closed again.
 param(
-    [string]$KritaDev = "D:\krita-dev",
+    # the build tree: %KRITA_DEV%, or the folder krita-dev in this repository
+    [string]$KritaDev = $(if ($env:KRITA_DEV) { $env:KRITA_DEV } else { Join-Path (Split-Path -Parent $PSScriptRoot) "krita-dev" }),
     [int]$TimeoutSec = 600
 )
 $ErrorActionPreference = "Stop"

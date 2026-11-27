@@ -1,9 +1,10 @@
 @echo off
 rem Clean build/run environment for the co-op build of Krita. Called by the other scripts.
-rem The build tree is %KRITA_DEV% (default D:\krita-dev); this repository is %COOP_REPO%.
+rem The build tree is %KRITA_DEV% (default: the folder krita-dev in this repository, which git ignores);
+rem this repository is %COOP_REPO%.
 rem It replaces the env.bat that KDE's setup script generates: that one freezes the whole PATH of the
 rem machine, and other compilers, CMake 4 or another Python on the PATH break the build.
-if not defined KRITA_DEV set "KRITA_DEV=D:\krita-dev"
+if not defined KRITA_DEV for %%I in ("%~dp0..\..\krita-dev") do set "KRITA_DEV=%%~fI"
 set "KD=%KRITA_DEV%"
 for %%I in ("%~dp0..\..") do set "COOP_REPO=%%~fI"
 set "PATH=%KD%\_install\bin;%KD%\_install\lib;%KD%\PythonEnv\Scripts;%KD%\tools\llvm-mingw\bin;%KD%\tools\llvm-mingw\x86_64-w64-mingw32\bin;%KD%\tools\ninja;%KD%\tools\cmake\bin;%SystemRoot%\System32;%SystemRoot%;%SystemRoot%\System32\Wbem;%SystemRoot%\System32\WindowsPowerShell\v1.0;C:\Program Files\Git\cmd;C:\Program Files\7-Zip"

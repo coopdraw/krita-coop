@@ -1,0 +1,9 @@
+{
+    // the Windows build tree (about 16 GB, 100 000 files) lives in this folder; keep the editor from watching and searching it
+    "files.watcherExclude": {
+        "**/krita-dev/**": true
+    },
+    "search.exclude": {
+        "**/krita-dev": true
+    }
+}
